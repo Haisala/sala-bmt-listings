@@ -1,6 +1,6 @@
 # Phase 2 automation note
 
-PASS/FAIL: PASS sau khi publish và kiểm tra deployment.
+PASS/FAIL: PASS
 
 ## Đã thêm/thay đổi
 
@@ -21,10 +21,10 @@ PASS/FAIL: PASS sau khi publish và kiểm tra deployment.
 
 ## Publish
 
-- Deployment result: cập nhật sau publish.
+- Deployment result: PASS — GitHub Actions Pages run #40268851412.
 - Website: https://haisala.github.io/sala-bmt-listings/
 - Căn xanh cô-ban: https://haisala.github.io/sala-bmt-listings/listings/nha-xanh-co-ban-cu-ebur/
-- SHA cuối: cập nhật sau publish.
+- SHA cuối: cập nhật sau commit publish.
 
 ## Cách Codex sử dụng
 
