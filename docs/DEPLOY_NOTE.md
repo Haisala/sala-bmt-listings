@@ -1,12 +1,12 @@
 # Deploy note
 
-PASS/FAIL: PASS khi workflow GitHub Pages hoàn tất.
+PASS/FAIL: PASS
 
 - Local repo path: `/Users/trandinhhieu/sala-bmt-listings`
 - Remote repo URL: https://github.com/Haisala/sala-bmt-listings
 - Website URL: https://haisala.github.io/sala-bmt-listings/
-- Commit hiện tại: cập nhật sau khi push
-- Deployment status: theo dõi tại GitHub Actions
+- Commit hiện tại trên remote main: `82d445614740f497439dffcca2057ba85e8beeca`
+- Deployment status: Success — GitHub Actions run #5
 
 ## Thêm listing
 
