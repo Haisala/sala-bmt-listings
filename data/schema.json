@@ -3,14 +3,18 @@
   "type": "array",
   "items": {
     "type": "object",
-    "required": ["slug", "title", "category", "status", "price", "area", "legal", "features", "images"],
+    "required": ["id", "slug", "title", "status", "price", "features", "images", "updatedAt"],
     "properties": {
-      "slug": {"type": "string", "pattern": "^[a-z0-9-]+$"},
-      "title": {"type": "string"}, "category": {"type": "string"},
-      "status": {"enum": ["Đang bán", "Đã cọc", "Đã bán"]},
-      "price": {"type": "integer", "minimum": 0}, "area": {"type": "string"},
-      "legal": {"type": "string"}, "features": {"type": "array", "items": {"type": "string"}},
-      "images": {"type": "array", "items": {"type": "string"}}
+      "id": {"type": "string"}, "slug": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+      "title": {"type": "string"}, "category": {"type": "string"}, "propertyType": {"type": "string"},
+      "areas": {"type": "array", "items": {"type": "string"}}, "addressText": {"type": "string"},
+      "price": {"type": "number", "exclusiveMinimum": 0}, "priceLabel": {"type": "string"}, "priceNote": {"type": "string"},
+      "width": {"type": "number", "exclusiveMinimum": 0}, "length": {"type": "number", "exclusiveMinimum": 0}, "landArea": {"type": "number", "exclusiveMinimum": 0},
+      "constructionArea": {"type": "number", "exclusiveMinimum": 0}, "bedrooms": {"type": "integer", "minimum": 0}, "bathrooms": {"type": "integer", "minimum": 0}, "roadWidth": {"type": "number", "exclusiveMinimum": 0},
+      "legal": {"type": "string"}, "legalNote": {"type": "string"}, "features": {"type": "array", "items": {"type": "string"}},
+      "locationNotes": {"type": "array", "items": {"type": "string"}}, "description": {"type": "string"}, "images": {"type": "array", "items": {"type": "string"}},
+      "status": {"enum": ["Đang bán", "Đã cọc", "Đã bán"]}, "featured": {"type": "boolean"}, "goodPrice": {"type": "boolean"},
+      "createdAt": {"type": "string"}, "updatedAt": {"type": "string"}, "source": {"type": "string"}, "contact": {"type": "object"}
     }
   }
 }
