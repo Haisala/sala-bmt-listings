@@ -1,10 +1,14 @@
 # Cobalt listing design note
 
-PASS/FAIL: PASS về UI, SEO và pipeline; bộ ảnh thật chưa được cung cấp trong workspace nên chưa có ảnh được chọn.
+PASS/FAIL: PASS — đã tích hợp bộ ảnh thật từ manifest và giữ nguyên dữ liệu giá/pháp lý của listing.
 
 ## Ảnh
 
-Thư mục chuẩn vẫn là `assets/images/nha-xanh-co-ban-cu-ebur/`. Khi có ảnh thật, `images[]` sẽ render ảnh đầu tiên làm hero/card thumbnail và các ảnh còn lại trong gallery. Hiện không dùng ảnh giả hoặc ảnh chụp màn hình không liên quan.
+Hero + thumbnail: `01-san-truoc.webp` (sân trước / chỗ đậu xe bán tải).
+
+Gallery theo manifest: `02-phong-khach.webp`, `03-phong-khach-toan-canh.webp`, `04-bep-an.webp`, `05-bep-an-goc-rong.webp`, `06-hanh-lang.webp`, `07-phong-ngu.webp`, `08-san-truoc-goc-rong.webp`, `09-san-truoc-goc-ben.webp`, `10-bep-an-phu.webp`.
+
+Tất cả ảnh nằm trong `assets/images/nha-xanh-co-ban-cu-ebur/`, không dùng ảnh giả.
 
 ## UI chính
 
@@ -18,6 +22,6 @@ Trang chi tiết giữ canonical riêng, title/description, Open Graph và JSON-
 
 ## Deploy
 
-Deployment: cập nhật sau publish.
+Deployment: cập nhật sau publish, kiểm tra homepage/listing/sitemap HTTP 200.
 URL listing: https://haisala.github.io/sala-bmt-listings/listings/nha-xanh-co-ban-cu-ebur/
 URL homepage: https://haisala.github.io/sala-bmt-listings/
