@@ -37,5 +37,32 @@
     "createdAt": "2026-10-26T00:00:00Z",
     "updatedAt": "2026-10-26T00:00:00Z",
     "source": "Thông tin do người dùng cung cấp"
+  },
+  {
+    "id": "can-ho-ecocity-ton-duc-thang-7-trieu",
+    "slug": "can-ho-ecocity-ton-duc-thang-7-trieu",
+    "title": "TÔN ĐỨC THẮNG · 7 TRIỆU/THÁNG",
+    "subtitle": "Căn hộ EcoCity trên 60m² · Full nội thất",
+    "category": "Cho thuê",
+    "transactionType": "RENTAL",
+    "propertyType": "Căn hộ",
+    "areas": ["EcoCity", "Tôn Đức Thắng"],
+    "addressText": "EcoCity / mặt tiền Tôn Đức Thắng",
+    "status": "Đang cho thuê",
+    "price": 7000000,
+    "priceUnit": "VND/tháng",
+    "priceLabel": "7.000.000đ/tháng",
+    "priceNote": "Giá thuê theo thông tin được duyệt; các điều khoản thuê cần xác minh thêm.",
+    "area": "Trên 60m²",
+    "features": ["Giường ngủ", "Hệ tủ lớn", "Khu bếp + tủ bếp", "Bàn ăn 4 ghế", "TV", "Điều hòa", "Tủ lạnh", "Máy giặt", "Lò vi sóng", "Máy hút mùi"],
+    "locationNotes": ["Bể bơi", "Hồ điều hòa & công viên cây xanh", "Khu thể dục – thể thao", "Gần Làng Đại học", "Thuận tiện di chuyển vào trung tâm Buôn Ma Thuột"],
+    "description": "Căn hộ EcoCity trên 60m², full nội thất, tại mặt tiền Tôn Đức Thắng. Thông tin theo dữ liệu được Owner duyệt.",
+    "images": [],
+    "featured": false,
+    "goodPrice": false,
+    "createdAt": "2026-11-02T00:00:00Z",
+    "updatedAt": "2026-11-02T00:00:00Z",
+    "source": "Owner-approved canonical facts",
+    "contact": {"name": "Hải Sala", "phone": "0909150729", "brand": "SALA HOME"}
   }
 ]
