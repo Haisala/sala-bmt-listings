@@ -24,7 +24,7 @@ The golden conversion flow is the real Cư Êbur listing `nha-xanh-co-ban-cu-ebu
 
 ## Deployment / production
 
-Deployment is intentionally recorded after the selected files are committed and Pages completes. Production verification must include homepage, direct Cư Êbur route, app/style/data assets, gallery contract fingerprint, EcoCity route, and public privacy scan.
+Commit `878998a` was pushed to `main`; GitHub Pages workflow `41421026297` completed successfully. Production HTTPS smoke: `/`, `/app.js`, `/styles.css`, `/data/listings.json`, Cư Êbur route, and EcoCity route all returned HTTP 200. Production fingerprint contains `gallery-swipe`, `savedView`, `refreshSaveButtons`, and corrected deep-link construction. Cư Êbur exposes 10 images; EcoCity remains 0. Public homepage scan found no `AI_INTERNAL_ANALYSIS`, `Deal Score`, `property_memory`, or `admin-password` markers.
 
 ## Limitations
 
