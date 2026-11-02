@@ -16,3 +16,13 @@
   .campaign-share-row{display:grid;grid-template-columns:1fr 1fr}
   .campaign-share-row button{grid-column:1/-1}
 }
+
+/* Lightweight touch galleries: preserve vertical page scrolling while horizontal swipes change photos. */
+.gallery-swipe{height:100%;position:relative;touch-action:pan-y;user-select:none}
+.gallery-swipe>img{width:100%;height:100%;object-fit:cover;display:block;transition:opacity .15s}
+.gallery-card .gallery-indicator{position:absolute;right:12px;bottom:12px;background:#0f2d5bcc;color:#fff;border-radius:999px;padding:5px 9px;font-size:.7rem;font-weight:800}
+.gallery-detail{height:510px;background:var(--warm)}
+.gallery-detail>img{height:420px!important}
+.gallery-detail .thumbs{height:90px}
+@media(min-width:700px){.gallery-detail{height:680px;border-radius:24px;overflow:hidden}.gallery-detail>img{height:590px!important}.gallery-detail .thumbs{height:90px}}
+.gallery-detail .gallery-indicator{position:absolute;right:14px;top:14px;background:#0f2d5bcc;color:#fff;border-radius:999px;padding:6px 10px;font-size:.75rem;font-weight:800}
