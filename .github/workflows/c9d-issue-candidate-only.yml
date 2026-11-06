@@ -1,0 +1,69 @@
+name: C9D synthetic issue candidate-only
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  candidate-only:
+    if: github.repository == 'Haisala/sala-bmt-listings'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate and write synthetic candidate record
+        env:
+          ACTOR: ${{ github.actor }}
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          EVENT_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, sys
+          from datetime import datetime, timedelta, timezone
+          actor = os.environ["ACTOR"]
+          title = os.environ["TITLE"]
+          body = os.environ.get("BODY") or ""
+          if actor != "Haisala" or not title.startswith("[C9D-SYNTHETIC]") or "c9d_schema:v1" not in body:
+              print(json.dumps({"result":"REJECTED","reason":"synthetic eligibility failed","EXECUTION_CALLS":0}))
+              sys.exit(0)
+          number = int(os.environ["ISSUE_NUMBER"])
+          candidate = {"candidate_id": f"c9d-issue-{number}", "repository":"Haisala/sala-bmt-listings",
+            "issue_number":number, "issue_url":os.environ["ISSUE_URL"], "event_name":"issues.opened",
+            "event_id":os.environ["EVENT_ID"], "nonce":f"issue-{number}-opened", "created_at":datetime.now(timezone.utc).isoformat(),
+            "expiry":(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(), "status":"CANDIDATE_ONLY"}
+          material = {k:candidate[k] for k in ("repository","issue_number","issue_url","event_name")}
+          candidate["task_digest"] = "sha256:" + hashlib.sha256(json.dumps(material,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+          os.makedirs("c9d-candidate", exist_ok=True)
+          with open("c9d-candidate/candidate.json", "w", encoding="utf-8") as f: json.dump(candidate, f, sort_keys=True, indent=2)
+          print(json.dumps({"result":"CANDIDATE_ONLY","candidate_id":candidate["candidate_id"],"EXECUTION_CALLS":0}, sort_keys=True))
+      - name: Read-only consumer
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, sys
+          from datetime import datetime, timezone
+          with open("c9d-candidate/candidate.json", encoding="utf-8") as f: r=json.load(f)
+          required={"candidate_id","repository","issue_number","issue_url","event_name","event_id","task_digest","nonce","created_at","expiry","status"}
+          reason=""
+          if set(r) != required: reason="malformed_record"
+          elif r["repository"] != "Haisala/sala-bmt-listings": reason="repository_not_allowlisted"
+          elif r["status"] != "CANDIDATE_ONLY": reason="invalid_status"
+          elif r["event_name"] != "issues.opened": reason="invalid_event"
+          else:
+            material={k:r[k] for k in ("repository","issue_number","issue_url","event_name")}
+            expected="sha256:"+hashlib.sha256(json.dumps(material,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+            if r["task_digest"] != expected: reason="digest_mismatch"
+            elif datetime.fromisoformat(r["expiry"].replace("Z","+00:00")) <= datetime.now(timezone.utc): reason="expired"
+          out={"result":"REJECTED" if reason else "SEEN", "reason":reason or "candidate_valid", "candidate_id":r.get("candidate_id"), "EXECUTION_CALLS":0}
+          with open("c9d-candidate/consumer-output.json","w",encoding="utf-8") as f: json.dump(out,f,sort_keys=True,indent=2)
+          print(json.dumps(out,sort_keys=True))
+          sys.exit(0)
+      - name: Upload candidate-only artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: c9d-candidate-${{ github.run_id }}
+          path: c9d-candidate/
