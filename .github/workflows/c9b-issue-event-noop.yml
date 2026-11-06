@@ -1,0 +1,19 @@
+name: C9B Synthetic Issue Event No-Op
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  observe-synthetic-issue:
+    if: >-
+      github.repository == 'Haisala/sala-bmt-listings' &&
+      github.actor == 'Haisala' &&
+      startsWith(github.event.issue.title, '[C9B-SYNTHETIC]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm synthetic issue event
+        run: echo "C9B_SYNTHETIC_ISSUE_EVENT_RECEIVED"
