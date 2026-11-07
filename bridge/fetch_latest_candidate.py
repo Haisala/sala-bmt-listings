@@ -12,11 +12,10 @@ import os
 import pathlib
 import shutil
 import subprocess
-import sys
 
 
 def run(*args: str) -> str:
-    return subprocess.check_output(args, text=True).strip()
+    return subprocess.check_output(list(args), text=True).strip()
 
 
 def main() -> int:
@@ -43,8 +42,9 @@ def main() -> int:
     staging.mkdir(parents=True)
 
     subprocess.run(
-        "gh", "run", "download", run_id, "--repo", repository,
-        "--dir", str(staging), check=True,
+        ["gh", "run", "download", run_id, "--repo", repository,
+         "--dir", str(staging)],
+        check=True,
     )
     print(json.dumps({"status": "ARTIFACT_FETCHED", "workflow_run": run_id, "inbox": str(inbox)}))
     return 0
