@@ -34,14 +34,26 @@ def validate(c):
   if dt.datetime.fromisoformat(c['expires_at'].replace('Z','+00:00'))<=now(): return False,'CANDIDATE_EXPIRED'
  except Exception:return False,'INVALID_EXPIRY'
  return True,''
+def workspace_snapshot(w):
+ return {p.relative_to(w).as_posix(): (p.is_dir(), p.stat().st_size, p.stat().st_mtime_ns)
+         for p in w.rglob('*')
+         if not any(part.startswith('.') for part in p.relative_to(w).parts)}
 def codex(root,cid):
- w=root/'workspaces'/cid; w.mkdir(parents=True,exist_ok=True); before=set(w.iterdir())
+ w=root/'workspaces'/cid; w.mkdir(parents=True,exist_ok=True); before=workspace_snapshot(w)
  prompt='Return exactly BRIDGE_MVP_AUTO_PICKUP_ACK. Do not modify files. Do not access customer data. Do not make network requests. Do not run shell commands.'
  try:
-  p=subprocess.run(['codex','exec','--ephemeral','--sandbox','read-only','-C',str(w),prompt],capture_output=True,text=True,timeout=60)
- except subprocess.TimeoutExpired:return 1,'TIMEOUT',False
- changed={p for p in w.iterdir() if not p.name.startswith('.')}-before
- out=p.stdout.strip(); return p.returncode,out,(p.returncode==0 and out==ACK and not changed)
+  p=subprocess.run(['codex','exec','--ephemeral','--sandbox','read-only','--skip-git-repo-check','-C',str(w),prompt],capture_output=True,text=True,timeout=60)
+ except subprocess.TimeoutExpired as e:return '',safe(str(e)) ,False,'CODEX_EXECUTION_ERROR'
+ except OSError as e:return '',safe(str(e)),False,'CODEX_EXECUTION_ERROR'
+ changed=workspace_snapshot(w)!=before
+ out=p.stdout.strip()
+ if p.returncode != 0:
+  return out,safe(p.stderr.strip() or out),False,'CODEX_EXIT_NONZERO'
+ if changed:
+  return out,'workspace changed',False,'WORKSPACE_CHANGED'
+ if out != ACK:
+  return out,safe(out),False,'OUTPUT_MISMATCH'
+ return out,'',True,''
 def result_text(c,status,reason,ack=None):
  return '\n'.join(['BRIDGE_MVP_RESULT',f"TASK_ID: {c.get('task_id','')}",f"ISSUE: #{c.get('issue_number','')}",f"STATUS: {status}",f"CODEX_ACK: {ack or 'NONE'}",f"ATTEMPTS: {1 if ack else 0}",'FILES_CHANGED: 0',f"REASON: {safe(reason)}",f"NEXT_ACTION: {'Owner review' if ack else 'Manual review'}"])
 def post_comment(repo,issue,body):
@@ -67,7 +79,7 @@ def process(root,fp,post=False,repo=REPO):
  if blocked:r.update(status='BLOCKED',error=breason); rp.write_text(json.dumps(r,indent=2)+'\n'); os.replace(claimed,root/'blocked'/claimed.name); return 'BLOCKED',breason
  blocked,breason=kill(root)
  if blocked:r.update(status='BLOCKED',error=breason); rp.write_text(json.dumps(r,indent=2)+'\n'); os.replace(claimed,root/'blocked'/claimed.name); return 'BLOCKED',breason
- r['codex_attempts']=1; out,raw,success=codex(root,c['candidate_id']); r.update(status='SUCCEEDED' if success else 'BLOCKED',completed_at=iso(now()),result=ACK if success else None,error=None if success else safe(raw)); rp.write_text(json.dumps(r,sort_keys=True,indent=2)+'\n'); os.replace(claimed,root/('completed' if success else 'blocked')/claimed.name)
+ r['codex_attempts']=1; out,raw,success,failure_reason=codex(root,c['candidate_id']); r.update(status='SUCCEEDED' if success else 'BLOCKED',completed_at=iso(now()),result=ACK if success else None,error=None if success else safe(raw),failure_reason=failure_reason or None); rp.write_text(json.dumps(r,sort_keys=True,indent=2)+'\n'); os.replace(claimed,root/('completed' if success else 'blocked')/claimed.name)
  if post:
   cm=post_comment(repo,c['issue_number'],result_text(c,r['status'],r.get('error') or 'synthetic_no_op_completed',ACK if success else None));
   if cm=='RESULT_REPORT_BLOCKED': return 'RESULT_REPORT_BLOCKED','comment_failed'
