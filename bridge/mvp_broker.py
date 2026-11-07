@@ -28,7 +28,7 @@ def kill(root):
 def validate(c):
  req=('schema_version','candidate_id','repository','issue_number','issue_url','event_id','event_name','task_id','objective','acceptance_criteria','task_digest','status','created_at','expires_at')
  if any(k not in c for k in req): return False,'MALFORMED_CANDIDATE'
- if c['schema_version']!=SCHEMA or c['repository']!=REPO or c['status']!='READY_FOR_BROKER': return False,'CANDIDATE_POLICY_REJECTED'
+ if c['schema_version']!=SCHEMA or c['repository']!=REPO or c['status']!='READY_FOR_BROKER' or not isinstance(c.get('acceptance_criteria'),list) or not c['acceptance_criteria'] or not c.get('scope'): return False,'CANDIDATE_POLICY_REJECTED'
  if c['task_digest']!=digest(c): return False,'DIGEST_MISMATCH'
  try:
   if dt.datetime.fromisoformat(c['expires_at'].replace('Z','+00:00'))<=now(): return False,'CANDIDATE_EXPIRED'
@@ -86,7 +86,7 @@ def main():
   try: fetch_artifact(args.repository,args.workflow_run,args.artifact,root)
   except Exception as e: print(json.dumps({'status':'BLOCKED','reason':str(e)})); return 2
  for i in range(1 if args.once else args.max_cycles):
-  files=sorted((root/'inbox').glob('*.json'))
+  files=sorted(p for p in (root/'inbox').rglob('candidate.json') if not any(part in {'claimed','completed','blocked','receipts'} for part in p.parts))
   for f in files: print(json.dumps({'status':process(root,f,args.post_comment,args.repository or REPO)}))
   if not args.once and i+1<args.max_cycles: time.sleep(args.poll_interval)
 if __name__=='__main__':main()
