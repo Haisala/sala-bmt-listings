@@ -7,7 +7,7 @@ def now(): return dt.datetime.now(dt.timezone.utc)
 def iso(x): return x.astimezone(dt.timezone.utc).isoformat()
 def canon(x): return json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False)
 def digest(c):
- keys=('repository','issue_number','issue_url','event_id','event_name','task_id','objective','acceptance_criteria')
+ keys=('repository','issue_number','issue_url','event_id','event_name','task_id','objective','acceptance_criteria','scope')
  return 'sha256:'+hashlib.sha256(canon({k:c[k] for k in keys}).encode()).hexdigest()
 def safe(s): return '[REDACTED]' if any(x in s.lower() for x in ('token=','password=','secret=','bearer ')) else str(s)[:200]
 def load(root):
