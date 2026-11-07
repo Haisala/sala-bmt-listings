@@ -13,7 +13,6 @@ jobs:
       issues: read
     steps:
       - name: Create sanitized candidate
-        id: candidate
         env:
           ISSUE_JSON: ${{ toJson(github.event.issue) }}
           EVENT_ID: ${{ github.run_id }}
@@ -21,22 +20,61 @@ jobs:
         run: |
           python3 - <<'PY'
           import datetime, hashlib, json, os, pathlib, sys
-          issue=json.loads(os.environ['ISSUE_JSON'])
-          body=issue.get('body') or ''
-          required=('TASK_ID','STATUS: READY','OBJECTIVE','ACCEPTANCE_CRITERIA')
-          if not all(x in body for x in required):
-              print('candidate filter rejected: missing schema marker', file=sys.stderr); raise SystemExit(1)
-          def field(name):
-              for line in body.splitlines():
-                  if line.startswith(name+':'): return line.split(':',1)[1].strip()
-              return ''
-          task_id=field('TASK_ID')
-          objective=field('OBJECTIVE')
-          acceptance=field('ACCEPTANCE_CRITERIA')
-          base={'repository':os.environ['GITHUB_REPOSITORY'],'issue_number':issue['number'],'issue_url':issue['html_url'],'event_id':os.environ['EVENT_ID'],'event_name':os.environ['EVENT_NAME'],'task_id':task_id,'objective':objective,'acceptance_criteria':acceptance}
-          canonical=json.dumps(base,sort_keys=True,separators=(',',':'),ensure_ascii=False)
-          candidate={**base,'schema_version':'bridge-mvp-v1','candidate_id':f"bridge-mvp-{issue['number']}-{os.environ['EVENT_ID']}",'task_digest':'sha256:'+hashlib.sha256(canonical.encode()).hexdigest(),'status':'READY_FOR_BROKER','created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'expires_at':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).isoformat()}
-          out=pathlib.Path('candidate.json'); out.write_text(json.dumps(candidate,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          issue = json.loads(os.environ["ISSUE_JSON"])
+          body = issue.get("body") or ""
+          lines = body.splitlines()
+          def scalar(name):
+              prefix = name + ":"
+              for line in lines:
+                  if line.startswith(prefix):
+                      return line.split(":", 1)[1].strip()
+              return ""
+          def block(name, next_names):
+              start = next((i for i, line in enumerate(lines) if line.startswith(name + ":")), None)
+              if start is None:
+                  return []
+              out = []
+              for line in lines[start + 1:]:
+                  if any(line.startswith(n + ":") for n in next_names):
+                      break
+                  value = line.strip()
+                  if value.startswith("-"):
+                      value = value[1:].strip()
+                  if value:
+                      out.append(value)
+              return out
+          task_id = scalar("TASK_ID")
+          project = scalar("PROJECT")
+          status = scalar("STATUS")
+          objective = scalar("OBJECTIVE")
+          scope = scalar("SCOPE")
+          acceptance = block("ACCEPTANCE_CRITERIA", ["SCOPE", "NO_CUSTOMER_DATA"])
+          if not all([task_id, project, status == "READY", objective, scope]) or not acceptance:
+              print("MISSING_OR_EMPTY_ACCEPTANCE_CRITERIA", file=sys.stderr)
+              raise SystemExit(1)
+          base = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "issue_number": issue["number"],
+              "issue_url": issue["html_url"],
+              "event_id": os.environ["EVENT_ID"],
+              "event_name": os.environ["EVENT_NAME"],
+              "task_id": task_id,
+              "objective": objective,
+              "acceptance_criteria": acceptance,
+              "scope": scope,
+          }
+          canonical = json.dumps(base, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+          now = datetime.datetime.now(datetime.timezone.utc)
+          candidate = {
+              **base,
+              "schema_version": "bridge-mvp-v1",
+              "candidate_id": f"bridge-mvp-{issue['number']}-{os.environ['EVENT_ID']}",
+              "task_digest": "sha256:" + hashlib.sha256(canonical.encode()).hexdigest(),
+              "status": "READY_FOR_BROKER",
+              "created_at": now.isoformat(),
+              "expires_at": (now + datetime.timedelta(hours=1)).isoformat(),
+          }
+          pathlib.Path("candidate.json").write_text(json.dumps(candidate, sort_keys=True, indent=2) + "\n", encoding="utf-8")
           PY
       - uses: actions/upload-artifact@v4
         with:
