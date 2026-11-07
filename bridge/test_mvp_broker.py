@@ -9,7 +9,7 @@ class M(unittest.TestCase):
  def test_kill_switch_fail_closed(self):
   with tempfile.TemporaryDirectory() as d:
    root=load(Path(d)); (root/'control'/'kill_switch.json').write_text('{bad'); p=root/'inbox'/'c.json';p.write_text(json.dumps(self.candidate())); self.assertEqual(process(root,p)[0],'BLOCKED')
- def test_malformed_rejected(self):
+ def test_acceptance_list_required(self):\n  c=self.candidate(); c['acceptance_criteria']='no-op'; self.assertEqual(validate(c)[1],'CANDIDATE_POLICY_REJECTED')\n def test_malformed_rejected(self):
   with tempfile.TemporaryDirectory() as d:
    root=load(Path(d));p=root/'inbox'/'c.json';p.write_text('{}');self.assertEqual(process(root,p)[0],'REJECTED')
 if __name__=='__main__':unittest.main()
