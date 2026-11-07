@@ -39,7 +39,7 @@ NaviBDS là app iPhone cho hệ thống Sala BĐS, kết nối staging backend �
 
 - Issue #16 từng ghi nhận lỗi cài đặt `MissingBundleExecutable` trên một artifact NaviBDS.
 - Artifact lỗi thiếu `CFBundleExecutable` dù Mach-O executable `NaviBDS` vẫn tồn tại.
-- Source static có `CFBundleExecutable=\$(EXECUTABLE_NAME)`, target dự kiến executable `NaviBDS`.
+- Source static có `CFBundleExecutable=$(EXECUTABLE_NAME)`, target dự kiến executable `NaviBDS`.
 - Có khả năng artifact stale/inconsistent, nhưng **chưa được xác nhận là bản đang cài trên iPhone**.
 - Vì thiết bị unavailable và không có `.app/.ipa/.xcarchive` hiện tại, chưa được phép kết luận app lỗi hay password lỗi.
 
@@ -93,7 +93,156 @@ Không build, install, login, đổi password, reset pairing hoặc sửa backen
 
 Backend, tunnel, HTTPS và static auth contract hiện PASS. Điểm mù đầu tiên là NaviApp artifact/bundle đang cài trên iPhone. Chưa có bằng chứng đủ để nói password sai. Sau khi app PASS mới kiểm tra lại login và session.
 
-## 11. Mẫu báo cáo Codex
+## 11. Bức tranh toàn bộ dự án Sala BĐS
+
+### 11.1 Mục tiêu kinh doanh
+
+Xây một hệ thống BĐS Buôn Ma Thuột do Owner duyệt thủ công ở các điểm quan trọng:
+
+`Nguồn tin Zalo/Facebook/cá nhân → AI chuẩn hóa/chống trùng → Owner duyệt → Property Master → Web/App → phân phối nội dung → khách hàng tiềm năng`
+
+Nguyên tắc: AI hỗ trợ thu thập, chuẩn hóa và phân phối; Owner giữ quyền duyệt tin, giá, trạng thái và nội dung công khai.
+
+### 11.2 Khu vực/sản phẩm ưu tiên
+
+- Thôn 8 Cư Êbur.
+- Tân An, đặc biệt dữ liệu theo mét dài.
+- EcoCity.
+- Trung tâm Buôn Ma Thuột.
+- Sản phẩm đã có dữ liệu: Nhà xanh cô-banh Cư Êbur, Nhà TDP 8, đất TDP4, shophouse EcoCity.
+
+### 11.3 Các bề mặt sản phẩm
+
+- **NaviBDS iPhone:** quản lý, duyệt và theo dõi vận hành BĐS.
+- **Customer Web:** Home/Feed/Search/Filter/Detail/CTA, mobile-first.
+- **Backend Code B:** auth, staging API, dữ liệu và các endpoint quản trị.
+- **Property Master:** nguồn dữ liệu chuẩn sau khi Owner duyệt.
+- **Kênh phân phối:** Facebook, TikTok, Zalo, Google và AI Search; không tự động gửi khi chưa có quyền/điều kiện phù hợp.
+
+### 11.4 Tiêu chuẩn giao diện
+
+- Mobile-first, ưu tiên iPhone 15 Pro Max.
+- Ảnh lớn, rõ; CTA Gọi/Zalo nổi bật.
+- Filter nhanh, chip “Vuốt →” dễ hiểu.
+- Ẩn map/video nếu chưa có dữ liệu thật.
+- Việt hóa đầy đủ.
+- Không redesign giao diện đã duyệt nếu không có yêu cầu mới.
+
+### 11.5 Quy tắc nội dung tin BĐS
+
+Thứ tự caption chuẩn:
+
+`Vị trí – Giá bán – Nhà/Đất → Ưu điểm → Thông tin chi tiết → CTA`
+
+Không tự thêm giá, pháp lý, diện tích hoặc tiện ích chưa có bằng chứng.
+
+## 12. Kiến trúc vận hành
+
+```text
+Nguồn tin
+  → Intake/chuẩn hóa
+  → chống trùng
+  → Owner review
+  → Property Master
+  → Backend/API
+  → NaviBDS + Customer Web
+  → xuất bản/phân phối
+```
+
+Các lớp phải kiểm tra độc lập: dữ liệu, API, auth, session, app artifact, public route và kênh phân phối.
+
+## 13. Hạ tầng và môi trường
+
+- MacBook là host phát triển/vận hành staging.
+- Code B là nguồn NaviBDS/backend chuẩn hiện tại.
+- Staging origin: `127.0.0.1:18876`.
+- Public staging: `https://staging.haisala.io.vn`.
+- Named tunnel staging: connector riêng, không dùng Quick Tunnel 8765 cho kết luận staging.
+- Public health phải kiểm bằng system TLS/no-proxy.
+- Local/public health cần đúng `staging/n02-staging`.
+- Production và dữ liệu thật nằm ngoài phạm vi audit hiện tại.
+
+## 14. Auth và tài khoản staging
+
+- Auth endpoint hiện tại: `POST /api/auth/login`.
+- Request chính: JSON field `password`.
+- Thành công theo static contract: authenticated, owner_id, expires_at và Set-Cookie.
+- Thất bại hiện trả 401 AUTH_FAILED; UI đang gom nhiều nguyên nhân thành một thông báo.
+- Password source là file plaintext staging với permission hạn chế; giá trị không được đọc/hiển thị trong ChatGPT/GitHub.
+- Chưa xác minh giá trị password Owner.
+- Chưa thực hiện reset/rotate password.
+- Khi cần reset phải có quy trình staging-only, backup, nhập ẩn cục bộ, verify rollback và không ghi secret vào log.
+
+## 15. NaviApp build/install runbook
+
+Trước mỗi kết luận login phải xác minh:
+
+1. iPhone Hải Sala Home được Xcode/CoreDevice nhận diện.
+2. Bundle ID là `vn.io.haisala.navi-bds`.
+3. Version/build đúng artifact dự kiến.
+4. `CFBundleExecutable` tồn tại và là `NaviBDS`.
+5. Executable là iOS Mach-O đúng architecture.
+6. Codesign/provisioning hợp lệ.
+7. API base URL là staging HTTPS.
+8. Artifact có provenance rõ ràng, không phải DerivedData cũ/stale.
+
+Lịch sử đã ghi nhận artifact thiếu `CFBundleExecutable` dù Mach-O tồn tại. Đây là gate phải giải quyết trước password.
+
+## 16. Lịch sử checkpoint quan trọng
+
+| Giai đoạn | Kết quả |
+|---|---|
+| Staging local backend | Health 200, identity đúng |
+| Public tunnel ban đầu | Từng HTTP 530 vì connector chưa active |
+| Named tunnel riêng | Đã tạo/load, public health ổn định |
+| Public TLS harness | urllib lỗi proxy/CA; system TLS curl PASS |
+| ACK/PID/TTL | Nhiều lần PASS/rollback do TTL/PID stale |
+| Synthetic auth | HTTP 401 PASS |
+| Auth diagnostic | Không tạo event; writer/activation failure chưa phải root cause login |
+| Synchronous writer contract | Patch thử nghiệm rollback; `_consume()` fail trước event |
+| Full connectivity audit | Backend/tunnel/static auth PASS; NaviApp installed artifact UNKNOWN |
+
+## 17. Quyết định và điều chưa được phép kết luận
+
+### Đã xác nhận
+
+- Backend staging đang sống.
+- Public route hiện hoạt động.
+- Auth handler nhận request.
+- Synthetic invalid auth trả 401.
+- Static app config trỏ staging.
+
+### Chưa xác nhận
+
+- App đang cài trên iPhone có đúng artifact không.
+- Password Owner đúng hay sai.
+- Account/allowlist có sẵn sàng không.
+- Session sau login có hoạt động không.
+- Protected API sau login có hoạt động không.
+
+### Không được suy diễn
+
+- HTTP 401 synthetic không chứng minh password Owner sai.
+- Health 200 không chứng minh login thành công.
+- Writer diagnostic lỗi không chứng minh auth backend lỗi.
+- App hiển thị thông báo chung không chứng minh password sai.
+
+## 18. Quy trình làm việc chuẩn ChatGPT–GitHub–Codex
+
+1. ChatGPT đọc handover và Issue #16.
+2. ChatGPT xác định **một gate duy nhất** cần xử lý.
+3. ChatGPT gửi prompt có phạm vi, cấm vượt dự án và tiêu chí PASS/FAIL.
+4. Codex thực hiện, bảo toàn dirty worktree và cập nhật Issue #16.
+5. Codex trả chat ngắn: STATUS, KEY_RESULT, NEXT.
+6. ChatGPT đọc kết quả, đối chiếu với handover.
+7. Checkpoint quan trọng cập nhật đồng thời Library và GitHub.
+8. Không chuyển gate khi gate trước còn UNKNOWN nếu chưa có lý do rõ ràng.
+
+## 19. Master next action
+
+**Chỉ làm một việc:** khôi phục read-only visibility của iPhone Hải Sala Home và xác minh NaviApp artifact đang cài. Không build/install/login/đổi password trước khi gate này PASS.
+
+## 20. Mẫu báo cáo Codex
 
 ```text
 STATUS: PASS / PARTIAL / BLOCKED / FAIL
