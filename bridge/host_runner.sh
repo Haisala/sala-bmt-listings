@@ -10,7 +10,8 @@ fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-INBOX="${BRIDGE_INBOX:-$REPO_ROOT/bridge_runtime/inbox}"
+RUNTIME_ROOT="${BRIDGE_RUNTIME_ROOT:-$REPO_ROOT/bridge_runtime}"
+INBOX="$RUNTIME_ROOT/inbox"
 PYTHON_BIN="${BRIDGE_PYTHON:-/usr/bin/python3}"
 
 export BRIDGE_INBOX="$INBOX"
