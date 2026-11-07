@@ -13,6 +13,9 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 INBOX="${BRIDGE_INBOX:-$REPO_ROOT/bridge_runtime/inbox}"
 PYTHON_BIN="${BRIDGE_PYTHON:-/usr/bin/python3}"
 
+export BRIDGE_INBOX="$INBOX"
+"$PYTHON_BIN" "$REPO_ROOT/bridge/fetch_latest_candidate.py"
+
 exec "$PYTHON_BIN" "$REPO_ROOT/bridge/mvp_broker.py" \
   --inbox "$INBOX" \
   --once
