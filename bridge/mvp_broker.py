@@ -40,7 +40,7 @@ def codex(root,cid):
  try:
   p=subprocess.run(['codex','exec','--ephemeral','--sandbox','read-only','-C',str(w),prompt],capture_output=True,text=True,timeout=60)
  except subprocess.TimeoutExpired:return 1,'TIMEOUT',False
- changed=set(w.iterdir())-before
+ changed={p for p in w.iterdir() if not p.name.startswith('.')}-before
  out=p.stdout.strip(); return p.returncode,out,(p.returncode==0 and out==ACK and not changed)
 def result_text(c,status,reason,ack=None):
  return '\n'.join(['BRIDGE_MVP_RESULT',f"TASK_ID: {c.get('task_id','')}",f"ISSUE: #{c.get('issue_number','')}",f"STATUS: {status}",f"CODEX_ACK: {ack or 'NONE'}",f"ATTEMPTS: {1 if ack else 0}",'FILES_CHANGED: 0',f"REASON: {safe(reason)}",f"NEXT_ACTION: {'Owner review' if ack else 'Manual review'}"])
