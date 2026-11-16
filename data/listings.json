@@ -93,6 +93,10 @@
     "locationNotes": [],
     "featured": false,
     "goodPrice": false,
-    "source": "Owner-approved canonical facts"
+    "source": "Owner-approved canonical facts",
+    "propertyId": "property-dce6787b77c38a0fc743aba9",
+    "propertyRevision": 3,
+    "projectionId": "projection-f619153045f496159740d978",
+    "projectionGeneratedAt": "2026-11-16T09:01:46Z"
   }
 ]
