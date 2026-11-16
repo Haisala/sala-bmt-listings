@@ -4,7 +4,9 @@
     "slug": "nha-xanh-co-ban-cu-ebur",
     "title": "Nhà xanh cô-ban – TDP 8 Cư Êbur",
     "category": "Nhà dưới 2 tỷ",
-    "areas": ["Cư Êbur"],
+    "areas": [
+      "Cư Êbur"
+    ],
     "propertyType": "Nhà ở",
     "addressText": "TDP 8 Cư Êbur",
     "status": "Đang bán",
@@ -17,8 +19,17 @@
     "length": 27,
     "landArea": 135,
     "legal": "Sổ hồng riêng",
-    "features": ["Nhà mới", "Đầy đủ nội thất", "Sân đậu bán tải", "Khu dân cư ô bàn cờ", "Gần trường/chợ"],
-    "locationNotes": ["Khoảng 4km tới Nguyễn Đình Chiểu", "Khoảng 7,5km tới Ngã Sáu"],
+    "features": [
+      "Nhà mới",
+      "Đầy đủ nội thất",
+      "Sân đậu bán tải",
+      "Khu dân cư ô bàn cờ",
+      "Gần trường/chợ"
+    ],
+    "locationNotes": [
+      "Khoảng 4km tới Nguyễn Đình Chiểu",
+      "Khoảng 7,5km tới Ngã Sáu"
+    ],
     "description": "Nhà xanh cô-ban tại TDP 8 Cư Êbur, thông tin theo dữ liệu được cung cấp.",
     "images": [
       "assets/images/nha-xanh-co-ban-cu-ebur/01-san-truoc.webp",
@@ -39,30 +50,49 @@
     "source": "Thông tin do người dùng cung cấp"
   },
   {
-    "id": "can-ho-ecocity-ton-duc-thang-7-trieu",
-    "slug": "can-ho-ecocity-ton-duc-thang-7-trieu",
-    "title": "TÔN ĐỨC THẮNG · 7 TRIỆU/THÁNG",
-    "subtitle": "Căn hộ EcoCity trên 60m² · Full nội thất",
-    "category": "Cho thuê",
-    "transactionType": "RENTAL",
+    "id": "can-ho-ecocity-ton-duc-thang-6-trieu",
+    "slug": "can-ho-ecocity-ton-duc-thang-6-trieu",
+    "title": "Căn hộ EcoCity · Tôn Đức Thắng · 6 triệu đồng/tháng",
+    "category": "Nhà đất",
     "propertyType": "Căn hộ",
-    "areas": ["EcoCity", "Tôn Đức Thắng"],
-    "addressText": "EcoCity / mặt tiền Tôn Đức Thắng",
+    "addressText": "EcoCity, mặt tiền Tôn Đức Thắng",
     "status": "Đang cho thuê",
-    "price": 7000000,
+    "price": 6000000.0,
+    "priceLabel": "6.000.000 VNĐ/tháng",
     "priceUnit": "VND/tháng",
-    "priceLabel": "7.000.000đ/tháng",
-    "priceNote": "Giá thuê theo thông tin được duyệt; các điều khoản thuê cần xác minh thêm.",
-    "area": "Trên 60m²",
-    "features": ["Giường ngủ", "Hệ tủ lớn", "Khu bếp + tủ bếp", "Bàn ăn 4 ghế", "TV", "Điều hòa", "Tủ lạnh", "Máy giặt", "Lò vi sóng", "Máy hút mùi"],
-    "locationNotes": ["Bể bơi", "Hồ điều hòa & công viên cây xanh", "Khu thể dục – thể thao", "Gần Làng Đại học", "Thuận tiện di chuyển vào trung tâm Buôn Ma Thuột"],
-    "description": "Căn hộ EcoCity trên 60m², full nội thất, tại mặt tiền Tôn Đức Thắng. Thông tin theo dữ liệu được Owner duyệt.",
-    "images": [],
+    "transactionType": "RENTAL",
+    "priceNote": "Giá chào theo dữ liệu được Owner duyệt; cần xác minh trước giao dịch.",
+    "area": "Trên 60 m²",
+    "dimensions": null,
+    "width": null,
+    "length": null,
+    "landArea": null,
+    "legal": null,
+    "road": null,
+    "features": [
+      "Đầy đủ nội thất"
+    ],
+    "description": "Căn hộ EcoCity trên 60 m², đầy đủ nội thất, mặt tiền Tôn Đức Thắng.",
+    "images": [
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2923.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2925.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2924.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2920.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2921.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2922.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2919.jpeg",
+      "assets/images/can-ho-ecocity-ton-duc-thang-6-trieu/IMG_2918.jpeg"
+    ],
+    "videos": [],
+    "reelUrl": null,
+    "createdAt": "2026-11-16T08:28:54Z",
+    "updatedAt": "2026-11-16T09:01:46Z",
+    "areas": [
+      "Trên 60 m²"
+    ],
+    "locationNotes": [],
     "featured": false,
     "goodPrice": false,
-    "createdAt": "2026-11-02T00:00:00Z",
-    "updatedAt": "2026-11-02T00:00:00Z",
-    "source": "Owner-approved canonical facts",
-    "contact": {"name": "Hải Sala", "phone": "0909150729", "brand": "SALA HOME"}
+    "source": "Owner-approved canonical facts"
   }
 ]
