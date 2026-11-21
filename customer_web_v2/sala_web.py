@@ -121,7 +121,10 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
         if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            parent = Path(self.path).parent
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if parent.is_symlink() or parent.stat().st_uid != os.getuid() or parent.stat().st_mode & 0o077:
+                raise PermissionError("Customer Web SQLite directory must be private and owned by the service user")
         self.initialize()
         if self.path != ":memory:":
             Path(self.path).chmod(0o600)
