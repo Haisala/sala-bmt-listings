@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.haisala.customer-web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string><string>-i</string>
+    <string>HOME=/Users/trandinhhieu</string>
+    <string>PATH=/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>SALA_BIND_HOST=127.0.0.1</string>
+    <string>SALA_PORT=18877</string>
+    <string>SALA_ALLOWED_ORIGINS=https://haisala.io.vn</string>
+    <string>SALA_DB_PATH=/Users/trandinhhieu/Library/Application Support/SALA Customer Web/data/customer-web.sqlite3</string>
+    <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+    <string>/Users/trandinhhieu/Library/Application Support/SALA Customer Web/current/sala_web.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/trandinhhieu/Library/Application Support/SALA Customer Web/current</string>
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/trandinhhieu/Library/Application Support/SALA Customer Web/logs/customer-web.log</string>
+  <key>StandardErrorPath</key><string>/Users/trandinhhieu/Library/Application Support/SALA Customer Web/logs/customer-web-error.log</string>
+</dict>
+</plist>
