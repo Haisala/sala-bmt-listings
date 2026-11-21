@@ -1,0 +1,287 @@
+"""Synthetic authenticated public-release Admin API/UI regression tests."""
+from __future__ import annotations
+
+import copy
+import io
+import json
+import os
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from property_memory import PropertyStore
+from property_memory.intake_review import process_intake
+from property_memory.mutation_service import ReliabilityBoundary
+from property_memory.review_center import ReviewCenter
+
+
+class M2:
+    def audit(self, *args, **kwargs): pass
+    def enqueue(self, *args, **kwargs): return {"status": "queued"}
+
+
+def fake_intake(identifier: str, *, title: str = "TEST_ONLY home", price: int = 1850000000) -> dict:
+    return {
+        "id": identifier, "source": "TEST_ONLY", "sourceGroup": "SYNTHETIC", "note": "TEST_ONLY fixture",
+        "preliminaryFacts": {"title": title, "property_type": "HOUSE", "transaction_type": "SALE",
+                             "address": "TEST_ONLY Cư Êbur " + identifier, "area": "TEST_ONLY Cư Êbur " + identifier, "width": 5,
+                             "length": 27, "land_area": 135, "price_vnd": price,
+                             "legal_status": "CERTIFICATE", "house_type": "TEST_ONLY townhouse",
+                             "bedrooms": 3, "bathrooms": 2},
+        "missingFields": [], "conflicts": [], "rightsStatus": "UNKNOWN", "media": [],
+    }
+
+
+def make_handler(adm, path: str, *, method: str, payload: dict | None = None,
+                 owner: str | None = "owner-primary", origin: str | None = None):
+    response: dict = {}
+    sid = "synthetic-session-" + uuid.uuid4().hex
+    if owner is not None:
+        adm.SESSIONS[sid] = time.time() + 3600
+        adm.SESSION_OWNERS[sid] = owner
+    body = json.dumps(payload or {}).encode("utf-8") if method == "POST" else b""
+    headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+    if origin is not None:
+        headers["Origin"] = origin
+    if owner is not None:
+        headers["Cookie"] = "bmt_admin_session=" + sid
+    handler = adm.Handler.__new__(adm.Handler)
+    handler.path = path
+    handler.command = method
+    handler.client_address = ("127.0.0.1", 40000)
+    handler.headers = headers
+    handler.rfile = io.BytesIO(body)
+    handler.wfile = io.BytesIO()
+    handler.send_json = lambda value, status=200, headers=None: response.update(status=status, value=value)
+    handler.send_response = lambda status: response.update(status=status)
+    handler.send_header = lambda *args: None
+    handler.end_headers = lambda: None
+    return handler, response
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory(prefix="sala-public-release-") as folder:
+        root = Path(folder)
+        (root / "admin-private").mkdir(mode=0o700)
+        os.environ["BMT_ADMIN_PRIVATE_ROOT"] = str(root / "admin-private")
+        os.environ["BMT_ADMIN_PREVIEW_ROOT"] = str(root / "preview")
+        os.environ["BMT_ADMIN_OWNER_ID"] = "owner-primary"
+        os.environ["BMT_ADMIN_HOST"] = "127.0.0.1"
+        os.environ["BMT_ADMIN_PORT"] = "43127"
+        os.environ["BMT_ENV"] = "test"
+        os.environ["BMT_ADMIN_LOCAL_HTTP_DEV"] = "1"
+        os.environ.pop("BMT_ADMIN_PUBLIC_ORIGIN", None)
+        os.environ.pop("BMT_ADMIN_ALLOWED_IP", None)
+
+        import admin.admin_server as adm
+        from property_memory.staging_artifact_writer import StagingArtifactError, write_staging_web_artifact
+
+        adm.configure_review_center(None)
+        store = PropertyStore(root / "core.sqlite3")
+        center = ReviewCenter(store, reliability=ReliabilityBoundary(M2().audit, M2().enqueue))
+        package = process_intake(store, center, fake_intake("intake-test-only-one"))
+        approved = center.approve(package["review_id"], expected_revision=1, owner_id="owner-primary",
+                                  decision="CREATE_NEW_PROPERTY", idempotency_key="gate-a-test-only-one")
+        review_id = approved["review_id"]
+        property_id = approved["mutation_result"]["property_id"]
+        adm.configure_review_center(center)
+        canonical_path, website_path = adm._public_preview_paths()
+        origin = f"http://127.0.0.1:{adm.PORT}"
+
+        initial = adm._public_release_snapshot(center, review_id)
+        assert initial["state"] == "NOT_APPROVED" and initial["can_approve"] is True
+        assert initial["property_revision"] == 1 and initial["media_summary"] == {"active": 0, "eligible": 0, "blocked": 0}
+
+        pending = process_intake(store, center, fake_intake("intake-test-only-pending"))
+        pending_status = adm._public_release_snapshot(center, pending["review_id"])
+        assert "GATE_A_APPROVAL_REQUIRED" in pending_status["blockers"] and not pending_status["can_approve"]
+        # Legal is an optional fact for this property type; missing and
+        # UNKNOWN must not block a release or be fabricated as confirmed.
+        store.update(property_id, {"legal_status": "UNKNOWN"})
+        legal_status = adm._public_release_snapshot(center, review_id)
+        assert "LEGAL_STATUS_UNCONFIRMED" not in legal_status["blockers"] and legal_status["can_approve"]
+        store.update(property_id, {"legal_status": None})
+        missing_legal_status = adm._public_release_snapshot(center, review_id)
+        assert "PUBLIC_FACTS_INCOMPLETE" not in missing_legal_status["blockers"] and missing_legal_status["can_approve"]
+        store.update(property_id, {"legal_status": "CERTIFICATE"})
+        attrs = dict(store.get(property_id).get("attributes") or {})
+        attrs["public_status"] = "Đang cho thuê"
+        store.update(property_id, {"attributes": attrs})
+        assert "PUBLIC_STATUS_UNSUPPORTED" in adm._public_release_snapshot(center, review_id)["blockers"]
+        attrs.pop("public_status")
+        store.update(property_id, {"attributes": attrs})
+        store.create_conflict(property_id, "price", ["TEST_ONLY-event"])
+        conflict_status = adm._public_release_snapshot(center, review_id)
+        assert "OPEN_PROPERTY_CONFLICTS" in conflict_status["blockers"] and not conflict_status["can_approve"]
+        conflict = store.list_conflicts(property_id)[0]
+        store.resolve_conflict(conflict["conflict_id"], "DISMISSED", "TEST_ONLY fixture resolved")
+        assert adm._public_release_snapshot(center, review_id)["can_approve"]
+
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload={"property_id": property_id, "expected_review_revision": 1,
+                                                  "expected_property_revision": 1, "idempotency_key": "csrf-denied-001"},
+                                         origin="https://attacker.invalid")
+        handler.do_POST()
+        assert response["status"] == 403 and response["value"]["error"] == "CSRF_ORIGIN_REJECTED"
+
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload={"property_id": property_id, "expected_review_revision": 1,
+                                                  "expected_property_revision": 1, "idempotency_key": "unauth-test-001"},
+                                         owner=None, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 401
+
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload={"property_id": property_id, "expected_review_revision": 1,
+                                                  "expected_property_revision": 1, "idempotency_key": "wrong-owner-001"},
+                                         owner="other-owner", origin=origin)
+        handler.do_POST()
+        assert response["status"] == 403 and response["value"]["error"] == "OWNER_PUBLIC_APPROVAL_REQUIRED"
+
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload={"property_id": property_id, "expected_review_revision": 1,
+                                                  "expected_property_revision": 1, "idempotency_key": "spoof-owner-001",
+                                                  "owner_id": "owner-primary"}, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 403 and response["value"]["error"] == "OWNER_ID_BODY_FORBIDDEN"
+
+        before = store.get(property_id)
+        property_count = len(store.list_properties())
+        approval_payload = {"property_id": property_id, "expected_review_revision": 1,
+                            "expected_property_revision": 1, "idempotency_key": "owner-release-test-001"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=approval_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 201 and response["value"]["status"] == "PREVIEW_READY"
+        assert response["value"]["published"] is False and response["value"]["decision_owner"] == "owner-primary"
+        first_web = json.loads(website_path.read_text(encoding="utf-8"))
+        first_core_projection = json.loads(canonical_path.read_text(encoding="utf-8"))
+        assert len(first_web) == len(first_core_projection) == 1
+        assert first_web[0]["propertyId"] == first_core_projection[0]["propertyId"] == property_id
+        assert first_web[0]["propertyRevision"] == 1 and first_web[0]["price"] == 1850000000
+        assert "internal_analysis" not in first_web[0] and store.get(property_id) == before
+        assert len(store.list_properties()) == property_count
+
+        # Same key replays safely; another key cannot create a second active release.
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=approval_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 201 and len(json.loads(website_path.read_text(encoding="utf-8"))) == 1
+        duplicate_payload = {**approval_payload, "idempotency_key": "owner-release-duplicate-001"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=duplicate_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 409 and response["value"]["error"] == "PUBLICATION_ALREADY_APPROVED", response
+
+        # A second Gate A review cannot create a competing active release for this canonical property.
+        competing = copy.deepcopy(approved)
+        competing["review_id"] = "review-" + uuid.uuid4().hex[:24]
+        competing["candidate"]["candidate_id"] = "candidate-" + uuid.uuid4().hex[:20]
+        competing["decision"] = {**competing["decision"], "revision": competing["review_revision"]}
+        center.packages[competing["review_id"]] = competing
+        center._persist(competing)
+        competing_status = adm._public_release_snapshot(center, competing["review_id"])
+        assert "PUBLIC_RELEASE_ACTIVE_OTHER_REVIEW" in competing_status["blockers"] and not competing_status["can_approve"]
+        competing_payload = {"property_id": property_id, "expected_review_revision": 1,
+                             "expected_property_revision": 1, "idempotency_key": "competing-release-001"}
+        handler, response = make_handler(adm, f"/api/reviews/{competing['review_id']}/public-release/approve", method="POST",
+                                         payload=competing_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 422 and "PUBLIC_RELEASE_ACTIVE_OTHER_REVIEW" in response["value"]["blockers"]
+
+        # Revision change removes the old preview; a stale request is rejected and a fresh explicit release updates it.
+        changed_attributes = dict(store.get(property_id).get("attributes") or {})
+        changed_attributes["public_status"] = "Đã cọc"
+        store.update(property_id, {"property_revision": 2, "price": 1900000000,
+                                   "lifecycle_state": "NEEDS_REVIEW", "attributes": changed_attributes})
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release", method="GET", origin=origin)
+        handler.do_GET()
+        assert response["status"] == 200 and response["value"]["state"] == "STALE"
+        assert response["value"]["preview_removed"] == 2
+        assert json.loads(website_path.read_text(encoding="utf-8")) == []
+        stale_payload = {**approval_payload, "expected_property_revision": 1, "idempotency_key": "stale-release-001"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=stale_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 409 and response["value"]["error"] == "STALE_PUBLIC_RELEASE_REVISION"
+        current_payload = {**approval_payload, "expected_property_revision": 2,
+                           "idempotency_key": "owner-release-revision-two"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=current_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 201
+        current_web = json.loads(website_path.read_text(encoding="utf-8"))
+        assert current_web[0]["propertyRevision"] == 2 and current_web[0]["price"] == 1900000000
+        assert current_web[0]["status"] == "Đã cọc"
+        after_release = store.get(property_id)
+        assert after_release["property_revision"] == 2 and after_release["price"] == 1900000000
+        assert len(store.list_properties()) == property_count
+
+        # Unknown media rights block any new public release and withdraw the isolated preview.
+        appearance = store.list_source_appearances(property_id)[0]
+        store.append_media_observation(property_id, {"appearance_id": appearance["appearance_id"],
+                                      "media_ref": "inbox/TEST_ONLY/photo.jpg", "rights_status": "UNKNOWN", "active": True},
+                                      event_id="media-public-release-test")
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release", method="GET", origin=origin)
+        handler.do_GET()
+        assert response["status"] == 200 and response["value"]["state"] == "INELIGIBLE"
+        assert "PUBLIC_MEDIA_RIGHTS_DENIED" in response["value"]["blockers"]
+        assert json.loads(website_path.read_text(encoding="utf-8")) == []
+        blocked_payload = {**current_payload, "idempotency_key": "blocked-media-release-01"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=blocked_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 422 and "PUBLIC_MEDIA_RIGHTS_DENIED" in response["value"]["blockers"]
+
+        revoke_payload = {"property_id": property_id, "expected_review_revision": 1,
+                          "expected_property_revision": 2, "idempotency_key": "owner-revoke-test-only",
+                          "reason": "TEST_ONLY rights not confirmed"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/revoke", method="POST",
+                                         payload=revoke_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 200 and response["value"]["status"] == "REVOKED"
+        assert response["value"]["preview_removed"] == 0
+        assert store.get(property_id)["property_revision"] == 2 and len(store.list_properties()) == property_count
+
+        # Preview-writer failure records a compensating revoke and restores both temp artifacts.
+        second_package = process_intake(store, center, fake_intake("intake-test-only-two", title="TEST_ONLY rollback home"))
+        second_approved = center.approve(second_package["review_id"], expected_revision=1, owner_id="owner-primary",
+                                         decision="CREATE_NEW_PROPERTY", idempotency_key="gate-a-test-only-two")
+        second_id = second_approved["mutation_result"]["property_id"]
+        web_before = website_path.read_bytes()
+        core_projection_before = canonical_path.read_bytes()
+        real_writer = adm.write_staging_web_artifact
+        adm.write_staging_web_artifact = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("TEST_ONLY injected writer failure"))
+        fail_payload = {"property_id": second_id, "expected_review_revision": 1,
+                        "expected_property_revision": 1, "idempotency_key": "rollback-release-test-01"}
+        try:
+            handler, response = make_handler(adm, f"/api/reviews/{second_approved['review_id']}/public-release/approve", method="POST",
+                                             payload=fail_payload, origin=origin)
+            handler.do_POST()
+        finally:
+            adm.write_staging_web_artifact = real_writer
+        assert response["status"] == 503 and response["value"]["rollback"] == "PASS"
+        assert response["value"]["release_revoked"] is True
+        assert website_path.read_bytes() == web_before and canonical_path.read_bytes() == core_projection_before
+        assert len(store.list_properties()) == property_count + 1
+        assert store.get(second_id)["property_revision"] == 1
+
+        # Authenticated Admin page exposes the same integrated control on narrow and desktop layouts.
+        handler, response = make_handler(adm, "/", method="GET", origin=origin)
+        handler.do_GET()
+        html_page = handler.wfile.getvalue().decode("utf-8")
+        assert response["status"] == 200 and "Duyệt công bố riêng" in html_page
+        assert "data-release-approve" in html_page and "data-release-revoke" in html_page
+        assert "min-height:44px;flex:1 1 180px" in html_page and 'name="viewport"' in html_page
+        assert store.get(property_id)["property_revision"] == 2
+
+        print("PUBLIC_RELEASE_ADMIN_PASS: Owner session + CSRF/origin, body spoof rejection, Gate A/review/Core revision binding, duplicate/replay, rights/conflict fail-closed, optional legal status, private Website preview, revision refresh, revoke, rollback, unchanged canonical count/revisions, Admin responsive controls")
+
+
+if __name__ == "__main__":
+    main()

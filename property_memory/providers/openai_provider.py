@@ -1,0 +1,176 @@
+"""Production-shaped OpenAI Responses adapter; never called by tests by default."""
+from __future__ import annotations
+import json
+import os
+import urllib.error
+import urllib.request
+import ssl
+import re
+from datetime import datetime, timezone
+from typing import Any, Protocol
+from ..intelligence import extract as validate_extract
+from ..keychain import CredentialError, resolve_openai_key
+
+DEFAULT_EXTRACTION_MODEL = "gpt-6-luna"
+PROPERTY_EXTRACTION_PROMPT_VERSION = "bmt-property-v1"
+ENDPOINT = "https://api.openai.com/v1/responses"
+CONTENT_PROMPT_VERSION = "content-studio-v2"
+
+EXTRACTION_RESPONSE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "fields": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {
+            "field": {"type": "string"},
+            "raw_value": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"}]},
+            "normalized_value": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"}]},
+            "origin": {"type": "string", "enum": ["AI_EXTRACTED", "AI_INFERRED"]},
+            "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "provenance": {"type": "object", "additionalProperties": False, "properties": {"intake_id": {"type": "string"}}, "required": ["intake_id"]},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["field", "raw_value", "normalized_value", "origin", "confidence", "evidence", "provenance", "warnings"]}},
+        "missing_fields": {"type": "array", "items": {"type": "string"}},
+        "conflicts": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {"field": {"type": "string"}, "message": {"type": "string"}, "evidence": {"type": "array", "items": {"type": "string"}}}, "required": ["field", "message", "evidence"]}},
+        "rights_status": {"type": "string", "enum": ["PERSONAL", "COMPANY", "UNKNOWN"]},
+        "raw_source": {"type": "object", "additionalProperties": False, "properties": {}, "required": []},
+    },
+    "required": ["fields", "missing_fields", "conflicts", "rights_status", "raw_source"],
+}
+
+CONTENT_RESPONSE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"variants": {"type": "array", "minItems": 5, "maxItems": 5, "items": {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "body": {"type": "string"}, "title": {"type": "string"},
+            "facts_used": {"type": "array", "items": {"type": "string"}},
+            "citations_used": {"type": "array", "items": {"type": "string"}},
+            "unknowns": {"type": "array", "items": {"type": "string"}},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["body", "title", "facts_used", "citations_used", "unknowns", "warnings"],
+    }}},
+    "required": ["variants"],
+}
+
+class ProviderError(RuntimeError):
+    def __init__(self, code: str, message: str, *, retryable: bool = False, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message[:240]); self.code = code; self.retryable = retryable
+        self.diagnostics = diagnostics or {}
+
+class Transport(Protocol):
+    def send(self, payload: dict[str, Any], api_key: str, *, timeout: float) -> dict[str, Any]: ...
+
+class UrllibTransport:
+    def send(self, payload: dict[str, Any], api_key: str, *, timeout: float) -> dict[str, Any]:
+        request = urllib.request.Request(ENDPOINT, data=json.dumps(payload).encode(), headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}, method="POST")
+        try:
+            context = ssl.create_default_context(cafile="/etc/ssl/cert.pem")
+            with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            details: dict[str, Any] = {"http_status": int(status), "endpoint": ENDPOINT}
+            try:
+                payload = json.loads(exc.read(4096).decode("utf-8", "replace"))
+                error = payload.get("error") if isinstance(payload, dict) else None
+                if isinstance(error, dict):
+                    for source, target in (("type", "error_type"), ("code", "error_code"), ("param", "error_param"), ("message", "error_message")):
+                        value = error.get(source)
+                        if isinstance(value, (str, int)):
+                            safe = re.sub(r"(?i)(bearer\s+|sk-[a-z0-9_-]+|api[_-]?key|token|cookie|authorization)[^\s,;]*", "[REDACTED]", str(value))
+                            details[target] = safe[:240 if target == "error_message" else 96]
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            raise ProviderError("RATE_LIMIT" if status == 429 else ("PROVIDER_5XX" if status >= 500 else "PROVIDER_4XX"), "OpenAI provider HTTP failure", retryable=status == 429 or status >= 500, diagnostics=details) from None
+        except TimeoutError:
+            raise ProviderError("PROVIDER_TIMEOUT", "OpenAI provider timeout", retryable=True) from None
+        except (urllib.error.URLError, json.JSONDecodeError):
+            raise ProviderError("PROVIDER_TRANSPORT", "OpenAI provider transport failure", retryable=True) from None
+
+def extraction_instructions() -> str:
+    return """Extract only facts explicitly supported by the Vietnamese real-estate source. Return JSON fields with field, raw_value, normalized_value, origin (AI_EXTRACTED or AI_INFERRED), confidence (HIGH/MEDIUM/LOW), evidence, provenance. Derived values must be AI_INFERRED. Never emit OWNER_CONFIRMED or publishing rights. Preserve missing_fields and conflicts. Use integer VND only when unambiguous."""
+
+def build_request(intake: dict[str, Any], model: str) -> dict[str, Any]:
+    allowed = {"id": intake.get("id") or intake.get("intake_id"), "source": intake.get("source"), "sourceGroup": intake.get("sourceGroup"), "text": intake.get("text") or intake.get("note"), "preliminaryFacts": intake.get("preliminaryFacts") or intake.get("preliminary") or intake.get("facts") or {}, "media": [{k: m.get(k) for k in ("path", "sha256", "role") if m.get(k) is not None} for m in intake.get("media", []) if isinstance(m, dict)]}
+    return {"model": model, "instructions": extraction_instructions(), "input": "Return JSON only.\n" + json.dumps(allowed, ensure_ascii=False), "text": {"format": {"type": "json_schema", "name": "property_extraction", "strict": True, "schema": EXTRACTION_RESPONSE_SCHEMA}}}
+
+
+def build_content_request(payload: dict[str, Any], model: str, *, max_output_tokens: int = 900) -> dict[str, Any]:
+    """Build the single Content request from approved facts and references only."""
+    allowed = {"generation_id": payload.get("generation_id"), "facts": payload.get("facts") or {},
+               "provenance": payload.get("provenance") or {}, "rights_status": payload.get("rights_status"),
+               "media": payload.get("media") or [], "output_count": 5}
+    instructions = ("Generate exactly five distinct private real-estate content variants from the supplied approved facts. "
+                    "Use only facts and citations supplied; list unknowns and warnings; do not invent legal or rights claims. "
+                    "Return JSON only.")
+    return {"model": model, "instructions": instructions, "input": json.dumps(allowed, ensure_ascii=False),
+            "max_output_tokens": max_output_tokens,
+            "text": {"format": {"type": "json_schema", "name": "content_studio_five", "strict": True, "schema": CONTENT_RESPONSE_SCHEMA}}}
+
+def _response_json(response: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(response.get("output_json"), dict): return response["output_json"]
+    text = response.get("output_text")
+    if isinstance(text, str):
+        try: return json.loads(text)
+        except json.JSONDecodeError: pass
+    output = response.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict): continue
+            for content in item.get("content", []):
+                if isinstance(content, dict) and isinstance(content.get("text"), str):
+                    try: return json.loads(content["text"])
+                    except json.JSONDecodeError: continue
+    raise ProviderError("MALFORMED_STRUCTURED_OUTPUT", "Provider structured output was invalid")
+
+class OpenAIPropertyProvider:
+    provider_name = "openai-responses"
+    def __init__(self, *, api_key: str | None = None, model: str | None = None, transport: Transport | None = None, timeout: float = 30.0, usage_sink: Any | None = None):
+        self.api_key = api_key if api_key is not None else None
+        self._credential_resolver = resolve_openai_key
+        self.model = model or os.environ.get("BMT_OPENAI_MODEL", DEFAULT_EXTRACTION_MODEL)
+        self.transport = transport or UrllibTransport(); self.timeout = timeout; self.usage_sink = usage_sink
+    def extract(self, source: dict[str, Any]) -> dict[str, Any]:
+        key = self.api_key
+        if key is None:
+            try: key = self._credential_resolver()
+            except CredentialError as exc: raise ProviderError(exc.code, "OpenAI credential is not configured") from None
+            except Exception: raise ProviderError("MISSING_CREDENTIAL", "OpenAI credential is not configured") from None
+        payload = build_request(source, self.model)
+        try:
+            response = self.transport.send(payload, key, timeout=self.timeout)
+        except ProviderError as exc:
+            exc.diagnostics.setdefault("model", self.model)
+            exc.diagnostics.setdefault("project_header_configured", bool(os.environ.get("OPENAI_PROJECT")))
+            raise
+        value = _response_json(response)
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        value["metadata"] = {"provider": self.provider_name, "model": self.model, "request_id": response.get("id") if isinstance(response.get("id"), str) else None, "prompt_version": PROPERTY_EXTRACTION_PROMPT_VERSION, "processed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "usage": usage}
+        if self.usage_sink is not None:
+            receipt_id = "receipt-" + __import__("hashlib").sha256((str(source.get("id") or source.get("intake_id")) + ":" + self.model).encode()).hexdigest()[:24]
+            self.usage_sink.record(receipt_id=receipt_id, intake_id=str(source.get("id") or source.get("intake_id")), stage="intake_extraction", operation="provider.extract", provider=self.provider_name, model=self.model, outcome="SUCCEEDED", usage=usage, provider_request_id=response.get("id") if isinstance(response.get("id"), str) else None, idempotency_key=receipt_id)
+        return value
+    def extract_validated(self, source: dict[str, Any]):
+        return validate_extract(self, source)
+
+    def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Generate Content through the same existing credential/Responses transport."""
+        key = self.api_key
+        if key is None:
+            try: key = self._credential_resolver()
+            except CredentialError as exc: raise ProviderError(exc.code, "OpenAI credential is not configured") from None
+            except Exception: raise ProviderError("MISSING_CREDENTIAL", "OpenAI credential is not configured") from None
+        request_payload = build_content_request(payload, self.model)
+        try:
+            response = self.transport.send(request_payload, key, timeout=self.timeout)
+        except ProviderError as exc:
+            exc.diagnostics.setdefault("model", self.model)
+            raise
+        value = _response_json(response)
+        if not isinstance(value.get("variants"), list) or len(value["variants"]) != 5:
+            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly five variants")
+        value["usage"] = response.get("usage") if isinstance(response.get("usage"), dict) else None
+        value["provider_request_id"] = response.get("id") if isinstance(response.get("id"), str) else None
+        value["metadata"] = {"provider": self.provider_name, "model": self.model, "prompt_version": CONTENT_PROMPT_VERSION}
+        return value
