@@ -15,6 +15,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: ./customer_web_v2/maintenance
       - id: deployment
         uses: actions/deploy-pages@v4
