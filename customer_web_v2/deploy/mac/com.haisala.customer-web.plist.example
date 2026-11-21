@@ -11,6 +11,7 @@
     <string>SALA_BIND_HOST=127.0.0.1</string>
     <string>SALA_PORT=18877</string>
     <string>SALA_ALLOWED_ORIGINS=https://haisala.io.vn</string>
+    <string>SALA_OWNER_PASSWORD_FILE=/Users/trandinhhieu/BMTPropertyHubPrivate/admin-password</string>
     <string>SALA_DB_PATH=/Users/trandinhhieu/Library/Application Support/SALA Customer Web/data/customer-web.sqlite3</string>
     <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
     <string>/Users/trandinhhieu/Library/Application Support/SALA Customer Web/current/sala_web.py</string>

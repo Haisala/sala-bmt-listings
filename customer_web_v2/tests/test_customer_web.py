@@ -92,6 +92,47 @@ class CustomerWebTests(unittest.TestCase):
         with self.assertRaises(AuthError):
             Application(Path(self.temp.name) / "weak.sqlite3", "short")
 
+    def test_existing_private_password_file_accepts_legacy_length_and_refreshes_on_restart(self):
+        source_dir = Path(self.temp.name) / "legacy-auth"
+        source_dir.mkdir(mode=0o700)
+        source = source_dir / "admin-password"
+        source.write_text("TEST_ONLY-old", encoding="utf-8")
+        source.chmod(0o600)
+        db_path = Path(self.temp.name) / "legacy.sqlite3"
+        app = Application(db_path, allowed_origins={ORIGIN}, owner_password_file=source)
+        self.assertEqual(app.handle("POST", "/api/login", {"Origin": ORIGIN}, json.dumps({"password": "TEST_ONLY-old"}).encode()).status, 200)
+        self.assertEqual(app.handle("POST", "/api/login", {"Origin": ORIGIN}, json.dumps({"password": PASSWORD}).encode()).status, 401)
+
+        source.write_text("TEST_ONLY-new", encoding="utf-8")
+        source.chmod(0o600)
+        restarted = Application(db_path, allowed_origins={ORIGIN}, owner_password_file=source)
+        self.assertEqual(restarted.handle("POST", "/api/login", {"Origin": ORIGIN}, json.dumps({"password": "TEST_ONLY-old"}).encode()).status, 401)
+        self.assertEqual(restarted.handle("POST", "/api/login", {"Origin": ORIGIN}, json.dumps({"password": "TEST_ONLY-new"}).encode()).status, 200)
+
+    def test_existing_password_file_must_be_private_and_regular(self):
+        source_dir = Path(self.temp.name) / "legacy-auth-open"
+        source_dir.mkdir(mode=0o700)
+        source = source_dir / "admin-password"
+        source.write_text("TEST_ONLY-password", encoding="utf-8")
+        source.chmod(0o644)
+        with self.assertRaises(AuthError):
+            Application(Path(self.temp.name) / "insecure.sqlite3", owner_password_file=source)
+
+        source.chmod(0o600)
+        link = source_dir / "password-link"
+        link.symlink_to(source)
+        with self.assertRaises(AuthError):
+            Application(Path(self.temp.name) / "symlink.sqlite3", owner_password_file=link)
+
+    def test_existing_password_file_cannot_be_ambiguous_with_inline_password(self):
+        source_dir = Path(self.temp.name) / "legacy-auth-conflict"
+        source_dir.mkdir(mode=0o700)
+        source = source_dir / "admin-password"
+        source.write_text("TEST_ONLY-password", encoding="utf-8")
+        source.chmod(0o600)
+        with self.assertRaises(AuthError):
+            Application(Path(self.temp.name) / "conflict.sqlite3", PASSWORD, {ORIGIN}, owner_password_file=source)
+
     def test_login_rate_limit(self):
         self.app.store.authenticate = Mock(side_effect=AuthError("invalid"))
         for _ in range(5):

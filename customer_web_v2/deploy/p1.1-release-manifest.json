@@ -1,6 +1,6 @@
 {
   "checkpoint": "NEW_CUSTOMER_WEB_BUILD_AND_APEX_REPLACE/P1.1",
-  "status": "CORE_SOURCE_READY_HOST_BLOCKED",
+  "status": "EXISTING_AUTH_REUSE_AND_LOCAL_HTTP_PASS_HOST_SERVICE_BLOCKED",
   "files": [
     {
       "path": "README.md",
@@ -8,7 +8,7 @@
     },
     {
       "path": "sala_web.py",
-      "sha256": "0973bdf8723749679691b6ccae83c8c8e1fde21fbd5c9561f5454981da6b7ad0"
+      "sha256": "cab7e4fb13280fc8c426ec39638c8d351f14bd8bad57b0113efce8fb86f94800"
     },
     {
       "path": "frontend/app.js",
@@ -28,7 +28,7 @@
     },
     {
       "path": "deploy/README.md",
-      "sha256": "7eacd66633654c6c9c7c5e3368b04cda4f20ec5de067d3f1b8f47a157baa7bb5"
+      "sha256": "0534fccca1cc624cd816d87ad192af9b225433881b9cfb2c0b427aa24e4c6719"
     },
     {
       "path": "deploy/runtime_dirs.py",
@@ -40,15 +40,15 @@
     },
     {
       "path": "deploy/mac/com.haisala.customer-web.plist.example",
-      "sha256": "fb5c15a904fb7b75e768e0fc576396383067256e6cbefe197da9b90740285bd5"
+      "sha256": "0f893b0c3ca5ab9efcee4c17640625c96e5dfbdd8f02d4a98bbcf8fc4ce89591"
     },
     {
       "path": "tests/test_customer_web.py",
-      "sha256": "83a9a99b7ca936daf95b6d9bd981f67f2fcbf71808db848b01344148cac7593f"
+      "sha256": "4c1491e3639708cabf7db94dd3df3ad3e9229569312cbd6c49defefd878b83fd"
     },
     {
       "path": "tests/test_deploy_config.py",
-      "sha256": "51f664a48014d87562ab0db9780d78835ab9d0907e4dec83eba82ec3c640e9d8"
+      "sha256": "75cf98173ed8ade709cb5cfbc9731701ba42bcbc1e54a8a4b1c51f68ad373f25"
     },
     {
       "path": "tests/test_storage_tools.py",
@@ -58,8 +58,8 @@
   "tests": [
     {
       "command": "python3 -m unittest discover -s customer_web_v2/tests -v",
-      "result": "16/16 PASS",
-      "scope": "temporary TEST_ONLY SQLite and image fixtures; includes backup/restore, permissions, disabled launchd and fail-closed missing Owner credential"
+      "result": "19/19 PASS",
+      "scope": "temporary TEST_ONLY database/files; includes legacy-length source, restart refresh, private permission/symlink rejection, ambiguous-source rejection and backup/restore"
     },
     {
       "command": "node --check customer_web_v2/frontend/app.js",
@@ -68,17 +68,38 @@
     {
       "command": "python3 -m py_compile customer_web_v2/sala_web.py customer_web_v2/deploy/*.py customer_web_v2/tests/*.py",
       "result": "PASS"
+    },
+    {
+      "command": "temporary local HTTP on 127.0.0.1:18877 using existing Owner source and TEST_ONLY DB",
+      "result": "PASS: health 200; anonymous admin 401; Owner login 200; protected admin 200; logout 200; Secure cookie; process cleanup PASS",
+      "scope": "no property data; password never emitted to output or logs"
+    },
+    {
+      "command": "Customer Web service install, launchd restart and host persistence",
+      "result": "NOT_RUN",
+      "scope": "no installed service; filesystem/service host gates remain pending"
     }
   ],
   "host_preflight": {
     "python": "3.13 available",
     "cloudflared": "installed",
-    "port_18877": "free at check",
-    "customer_web_launchd": "not loaded",
-    "owner_credential": "global launchd variable presence could not be attributed; not consumed"
+    "port_18877": "free after smoke process cleanup",
+    "customer_web_launchd": "not loaded or installed",
+    "owner_source_metadata": "private source verified by metadata only before local HTTP check; no content logged",
+    "persistent_uptime": "not proven",
+    "tunnel": "not configured",
+    "apex": "maintenance page remains active"
   },
   "production_host": "NOT_CONFIGURED",
   "dns_or_tunnel_changes": false,
   "real_data_read_or_written": false,
-  "owner_secret_values_recorded": false
+  "owner_secret_values_recorded": false,
+  "owner_auth_source": {
+    "path": "/Users/trandinhhieu/BMTPropertyHubPrivate/admin-password",
+    "file_metadata": "Owner-owned regular file mode 0600; parent directory mode 0700; content never printed",
+    "integration": "SALA_OWNER_PASSWORD_FILE; process reads source at startup and stores only a salted PBKDF2 verifier in the isolated Customer Web SQLite DB; controlled restart refreshes it",
+    "legacy_password_compatibility": "The existing source is 12 bytes and therefore cannot meet the previous 16-character bootstrap minimum; file-source mode explicitly supports reuse without changing the source password",
+    "http_validation": "PASS using the existing source in memory against temporary TEST_ONLY SQLite; only status/cookie flags recorded"
+  },
+  "real_property_data_read_or_written": false
 }

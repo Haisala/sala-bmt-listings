@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import time
 import threading
 import unicodedata
@@ -34,6 +35,41 @@ ASSET_MAP = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/robots.txt": ("robots.txt", "text/plain; charset=utf-8"),
 }
+
+
+def read_owner_password_file(path: str | Path) -> str:
+    """Read the existing SALA BĐS Owner verifier source without logging/copying it."""
+    source = Path(path)
+    if source.is_symlink():
+        raise AuthError("Owner password source must not be a symlink")
+    parent = source.parent
+    parent_info = parent.stat()
+    if (parent.is_symlink() or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid()
+            or stat.S_IMODE(parent_info.st_mode) & 0o077):
+        raise AuthError("Owner password directory must be private and service-user-owned")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError as exc:
+        raise AuthError("Owner password source is unavailable") from exc
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077):
+            raise AuthError("Owner password source must be a private regular file")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise AuthError("Owner password source is invalid")
+        try:
+            password = raw.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise AuthError("Owner password source is invalid") from exc
+        if not password or "\x00" in password:
+            raise AuthError("Owner password source is empty or invalid")
+        return password
+    finally:
+        os.close(fd)
 MIME_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 
 
@@ -195,17 +231,21 @@ class Store:
             if version != 1:
                 raise RuntimeError("Unsupported Customer Web database schema version")
 
-    def provision_owner(self, password: str | None) -> bool:
+    def provision_owner(self, password: str | None, *, allow_existing_short: bool = False, refresh: bool = False) -> bool:
         if not password:
             return False
-        if len(password) < 16:
+        if len(password) < 16 and not allow_existing_short:
             raise AuthError("Owner password must contain at least 16 characters")
         with self.connection() as db:
-            if db.execute("SELECT 1 FROM owner_auth WHERE username='owner'").fetchone():
+            current = db.execute("SELECT 1 FROM owner_auth WHERE username='owner'").fetchone()
+            if current and not refresh:
                 return True
             salt = secrets.token_bytes(16)
             digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ROUNDS)
-            db.execute("INSERT INTO owner_auth VALUES('owner',?,?,?)", (salt, digest, PBKDF2_ROUNDS))
+            if current:
+                db.execute("UPDATE owner_auth SET salt=?,password_hash=?,rounds=? WHERE username='owner'", (salt, digest, PBKDF2_ROUNDS))
+            else:
+                db.execute("INSERT INTO owner_auth VALUES('owner',?,?,?)", (salt, digest, PBKDF2_ROUNDS))
         return True
 
     def authenticate(self, password: str | None) -> str:
@@ -399,9 +439,15 @@ class Store:
 
 
 class Application:
-    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND):
+    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None):
         self.store = Store(db_path)
-        self.owner_configured = self.store.provision_owner(owner_password)
+        if owner_password is not None and owner_password_file is not None:
+            raise AuthError("Configure exactly one Owner password source")
+        if owner_password_file is not None:
+            existing_password = read_owner_password_file(owner_password_file)
+            self.owner_configured = self.store.provision_owner(existing_password, allow_existing_short=True, refresh=True)
+        else:
+            self.owner_configured = self.store.provision_owner(owner_password)
         self.allowed_origins = allowed_origins or {"https://haisala.io.vn"}
         self.frontend = frontend
         self.login_attempts: dict[str, list[float]] = {}
@@ -542,7 +588,11 @@ def serve() -> None:
     port = int(os.environ.get("SALA_PORT", "18877"))
     if host not in {"127.0.0.1", "::1", "localhost"} or port in {8765, 18876}:
         raise SystemExit("Refusing non-loopback or reserved bind target")
-    app = Application(os.environ.get("SALA_DB_PATH", str(ROOT / "var" / "customer_web.sqlite3")), os.environ.get("SALA_OWNER_PASSWORD"), set(filter(None, os.environ.get("SALA_ALLOWED_ORIGINS", "https://haisala.io.vn").split(","))))
+    owner_password = os.environ.get("SALA_OWNER_PASSWORD")
+    owner_password_file = os.environ.get("SALA_OWNER_PASSWORD_FILE")
+    if owner_password and owner_password_file:
+        raise SystemExit("Configure exactly one Owner password source")
+    app = Application(os.environ.get("SALA_DB_PATH", str(ROOT / "var" / "customer_web.sqlite3")), owner_password, set(filter(None, os.environ.get("SALA_ALLOWED_ORIGINS", "https://haisala.io.vn").split(","))), owner_password_file=owner_password_file)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):

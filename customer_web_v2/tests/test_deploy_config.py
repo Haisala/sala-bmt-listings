@@ -27,7 +27,8 @@ class DeployConfigTests(unittest.TestCase):
         self.assertTrue(job["KeepAlive"])
         self.assertIn("SALA_PORT=18877", args)
         self.assertIn("SALA_BIND_HOST=127.0.0.1", args)
-        self.assertFalse(any("SALA_OWNER_PASSWORD" in value for value in args))
+        self.assertIn("SALA_OWNER_PASSWORD_FILE=/Users/trandinhhieu/BMTPropertyHubPrivate/admin-password", args)
+        self.assertFalse(any(value.startswith("SALA_OWNER_PASSWORD=") for value in args))
         self.assertNotIn("EnvironmentVariables", job)
 
     def test_missing_owner_credential_fails_closed(self):
