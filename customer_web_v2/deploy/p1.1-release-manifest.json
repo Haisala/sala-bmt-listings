@@ -1,0 +1,84 @@
+{
+  "checkpoint": "NEW_CUSTOMER_WEB_BUILD_AND_APEX_REPLACE/P1.1",
+  "status": "CORE_SOURCE_READY_HOST_BLOCKED",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "fa5e36f80d556ff0b52fa05d3aa47dfc4511ebb869938e54d2bec608b6ca18a0"
+    },
+    {
+      "path": "sala_web.py",
+      "sha256": "0973bdf8723749679691b6ccae83c8c8e1fde21fbd5c9561f5454981da6b7ad0"
+    },
+    {
+      "path": "frontend/app.js",
+      "sha256": "65249d72b64d8bc7ac258c6a2eab64b5dd5f51ce5c9575c68b7cdf0d3b1596ec"
+    },
+    {
+      "path": "frontend/index.html",
+      "sha256": "cb4c36324815aa41670c7ba89f407762538d3597e372a0345ab3bb098c4de493"
+    },
+    {
+      "path": "frontend/robots.txt",
+      "sha256": "331ea9090db0c9f6f597bd9840fd5b171830f6e0b3ba1cb24dfa91f0c95aedc1"
+    },
+    {
+      "path": "frontend/styles.css",
+      "sha256": "5d7001cacf12658af67c4efd9231908eb22639ce902222a795d45b897befa876"
+    },
+    {
+      "path": "deploy/README.md",
+      "sha256": "7eacd66633654c6c9c7c5e3368b04cda4f20ec5de067d3f1b8f47a157baa7bb5"
+    },
+    {
+      "path": "deploy/runtime_dirs.py",
+      "sha256": "5da111c60fafd83be341aaee05612338182a86ebd5e6749cacdc24583f647f94"
+    },
+    {
+      "path": "deploy/storage_tools.py",
+      "sha256": "c41d1c9ece4ceda192ca1911122091956e4225130bfe6628130a18935f034a70"
+    },
+    {
+      "path": "deploy/mac/com.haisala.customer-web.plist.example",
+      "sha256": "fb5c15a904fb7b75e768e0fc576396383067256e6cbefe197da9b90740285bd5"
+    },
+    {
+      "path": "tests/test_customer_web.py",
+      "sha256": "83a9a99b7ca936daf95b6d9bd981f67f2fcbf71808db848b01344148cac7593f"
+    },
+    {
+      "path": "tests/test_deploy_config.py",
+      "sha256": "51f664a48014d87562ab0db9780d78835ab9d0907e4dec83eba82ec3c640e9d8"
+    },
+    {
+      "path": "tests/test_storage_tools.py",
+      "sha256": "db6b7c2c6625b053cd6e80239f62f1b2172bffe84585f4479940d766c43b4e93"
+    }
+  ],
+  "tests": [
+    {
+      "command": "python3 -m unittest discover -s customer_web_v2/tests -v",
+      "result": "16/16 PASS",
+      "scope": "temporary TEST_ONLY SQLite and image fixtures; includes backup/restore, permissions, disabled launchd and fail-closed missing Owner credential"
+    },
+    {
+      "command": "node --check customer_web_v2/frontend/app.js",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 -m py_compile customer_web_v2/sala_web.py customer_web_v2/deploy/*.py customer_web_v2/tests/*.py",
+      "result": "PASS"
+    }
+  ],
+  "host_preflight": {
+    "python": "3.13 available",
+    "cloudflared": "installed",
+    "port_18877": "free at check",
+    "customer_web_launchd": "not loaded",
+    "owner_credential": "global launchd variable presence could not be attributed; not consumed"
+  },
+  "production_host": "NOT_CONFIGURED",
+  "dns_or_tunnel_changes": false,
+  "real_data_read_or_written": false,
+  "owner_secret_values_recorded": false
+}

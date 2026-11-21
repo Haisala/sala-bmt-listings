@@ -1,0 +1,60 @@
+{
+  "checkpoint": "NEW_CUSTOMER_WEB_BUILD_AND_APEX_REPLACE/P0.9",
+  "status": "CODE_BUILT_LOCAL_TESTS_PASS_LIVE_HTTP_BLOCKED",
+  "source_sha256": "c27477ef3a11e13cfce46cac9aeb358b4ad6f2ed5c454089105577a96867759e",
+  "synthetic_fixture_sha256": "6af484b8a73288a07fec730818a6de8bebce88aa915b52f66a8769bfb865f434",
+  "artifact_sha256": "c27477ef3a11e13cfce46cac9aeb358b4ad6f2ed5c454089105577a96867759e",
+  "files": [
+    {
+      "path": ".gitignore",
+      "sha256": "1f3107fd141fb0b8d3c1fd433791994184ac1bb3d3be629e11587be57b5ae580"
+    },
+    {
+      "path": "README.md",
+      "sha256": "fa5e36f80d556ff0b52fa05d3aa47dfc4511ebb869938e54d2bec608b6ca18a0"
+    },
+    {
+      "path": "frontend/app.js",
+      "sha256": "65249d72b64d8bc7ac258c6a2eab64b5dd5f51ce5c9575c68b7cdf0d3b1596ec"
+    },
+    {
+      "path": "frontend/index.html",
+      "sha256": "cb4c36324815aa41670c7ba89f407762538d3597e372a0345ab3bb098c4de493"
+    },
+    {
+      "path": "frontend/robots.txt",
+      "sha256": "331ea9090db0c9f6f597bd9840fd5b171830f6e0b3ba1cb24dfa91f0c95aedc1"
+    },
+    {
+      "path": "frontend/styles.css",
+      "sha256": "5d7001cacf12658af67c4efd9231908eb22639ce902222a795d45b897befa876"
+    },
+    {
+      "path": "sala_web.py",
+      "sha256": "8507b474d4ddbfb0ff3b4e5b97bc9be7d0c049d6c38f13d3107f075c5117f514"
+    },
+    {
+      "path": "tests/test_customer_web.py",
+      "sha256": "83a9a99b7ca936daf95b6d9bd981f67f2fcbf71808db848b01344148cac7593f"
+    }
+  ],
+  "tests": [
+    {
+      "command": "python3 -m unittest discover -s customer_web_v2/tests -v",
+      "result": "10/10 PASS",
+      "scope": "temporary TEST_ONLY database and image fixture"
+    },
+    {
+      "command": "node --check customer_web_v2/frontend/app.js",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 -m py_compile customer_web_v2/sala_web.py customer_web_v2/tests/test_customer_web.py",
+      "result": "PASS"
+    }
+  ],
+  "live_http": "BLOCKED_BY_SANDBOX_PERMISSIONERROR on loopback 127.0.0.1:18877; no listener left running",
+  "browser": "NOT_RUN",
+  "live_deployed": false,
+  "apex_changed": false
+}

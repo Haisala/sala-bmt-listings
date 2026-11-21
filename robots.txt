@@ -1,3 +1,0 @@
-User-agent: *
-Allow: /
-Sitemap: https://haisala.github.io/sala-bmt-listings/sitemap.xml
