@@ -1,6 +1,6 @@
 {
   "checkpoint": "NEW_CUSTOMER_WEB_BUILD_AND_APEX_REPLACE/P1.1",
-  "status": "EXISTING_AUTH_REUSE_AND_LOCAL_HTTP_PASS_HOST_SERVICE_BLOCKED",
+  "status": "HOST_LOCAL_PASS_PUBLIC_INGRESS_BLOCKED_BY_AUTO_REVIEW",
   "files": [
     {
       "path": "README.md",
@@ -59,7 +59,7 @@
     {
       "command": "python3 -m unittest discover -s customer_web_v2/tests -v",
       "result": "19/19 PASS",
-      "scope": "temporary TEST_ONLY database/files; includes legacy-length source, restart refresh, private permission/symlink rejection, ambiguous-source rejection and backup/restore"
+      "scope": "temporary TEST_ONLY database/files; includes legacy-length password source, restart refresh, permission/symlink/conflict rejection and SQLite backup/restore"
     },
     {
       "command": "node --check customer_web_v2/frontend/app.js",
@@ -70,27 +70,38 @@
       "result": "PASS"
     },
     {
-      "command": "temporary local HTTP on 127.0.0.1:18877 using existing Owner source and TEST_ONLY DB",
-      "result": "PASS: health 200; anonymous admin 401; Owner login 200; protected admin 200; logout 200; Secure cookie; process cleanup PASS",
-      "scope": "no property data; password never emitted to output or logs"
+      "command": "local host HTTP on 127.0.0.1:18877 using existing SALA BDS password source and new empty Customer Web DB",
+      "result": "PASS: health=200, public listings=0, anonymous admin=401, owner login=200, protected admin=200, Secure cookie, logout=200, revoked session=401"
     },
     {
-      "command": "Customer Web service install, launchd restart and host persistence",
-      "result": "NOT_RUN",
-      "scope": "no installed service; filesystem/service host gates remain pending"
+      "command": "launchd restart, session persistence, SQLite online backup/restore",
+      "result": "PASS; owner session survived controlled restart; backup and restore validated; TEST_ONLY backup artifacts removed"
+    },
+    {
+      "command": "unauthenticated host POST /api/intakes and POST /api/listings/TEST_ONLY-no-record/review",
+      "result": "PASS; both returned 401 and created no records"
+    },
+    {
+      "command": "log redaction check against in-memory existing password",
+      "result": "PASS; no matching secret in private service logs; log contents not emitted"
+    },
+    {
+      "command": "Chrome local browser check at http://127.0.0.1:18877/",
+      "result": "PASS; responsive app shell loaded and empty approved-list state displayed; mobile/iPhone hardware not tested"
     }
   ],
   "host_preflight": {
     "python": "3.13 available",
-    "cloudflared": "installed",
-    "port_18877": "free after smoke process cleanup",
-    "customer_web_launchd": "not loaded or installed",
-    "owner_source_metadata": "private source verified by metadata only before local HTTP check; no content logged",
-    "persistent_uptime": "not proven",
-    "tunnel": "not configured",
-    "apex": "maintenance page remains active"
+    "cloudflared": "installed; existing auth supports read-only named-tunnel lookup",
+    "port_18877": "Customer Web listener active; loopback-only",
+    "customer_web_launchd": "com.haisala.customer-web loaded and active; KeepAlive=true; RunAtLoad=false",
+    "release_commit": "6b4b0501e50aecf23a580f63b1e23a1dfcc4b155",
+    "runtime_directory_modes": "root/data/backups/logs all 0700; SQLite private",
+    "owner_source": "existing source validated; file 0600 and parent 0700; actual login succeeded without value output",
+    "uptime": "system boot time 2026-11-02 21:21 local; approximately 19 days at check; pmset sleep=0",
+    "persistent_uptime": "observed uptime and no automatic sleep policy, but future outage/power reliability is not guaranteed"
   },
-  "production_host": "NOT_CONFIGURED",
+  "production_host": "LOCAL_CUSTOMER_SERVICE_ACTIVE_PUBLIC_INGRESS_NOT_CONFIGURED",
   "dns_or_tunnel_changes": false,
   "real_data_read_or_written": false,
   "owner_secret_values_recorded": false,
@@ -101,5 +112,14 @@
     "legacy_password_compatibility": "The existing source is 12 bytes and therefore cannot meet the previous 16-character bootstrap minimum; file-source mode explicitly supports reuse without changing the source password",
     "http_validation": "PASS using the existing source in memory against temporary TEST_ONLY SQLite; only status/cookie flags recorded"
   },
-  "real_property_data_read_or_written": false
+  "real_property_data_read_or_written": false,
+  "public_ingress": {
+    "named_customer_tunnel_lookup": "PASS; exact name sala-customer-web not found",
+    "create_request": "BLOCKED_BY_AUTO_REVIEW",
+    "automatic_review_reason": "new persistent Cloudflare tunnel/credential treated as external infrastructure mutation without trusted authorization",
+    "dns_or_tunnel_changes": false,
+    "public_apex": "maintenance page remains; new app not public",
+    "independent_https_mobile": "NOT_RUN; requires allowed Customer Web ingress"
+  },
+  "owner_password_changed": false
 }
