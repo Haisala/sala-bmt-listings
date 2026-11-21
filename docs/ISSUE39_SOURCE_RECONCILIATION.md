@@ -2,7 +2,7 @@
 
 ## Baselines
 
-- GitHub `main`: `4f9bb825e8da30997522cb533196c56c57ce24fb`.
+- GitHub `main`: `83394a901dcc2c1944f083b65fc01c22e5a6602f`.
 - Code A (`codex/designer-web`): `720ebd4c87344d35935e6ccb3da39b1b9e04d758`, dirty; left untouched.
 - Code B (`codex/system-backend`): `008057acd084e5452928c81bc7421baf9575d8191`, dirty/untracked source present; left untouched.
 - Reconciliation branch starts at the exact GitHub `main` SHA above. This is source review only; no service/runtime or property data was changed.

@@ -1,6 +1,6 @@
 # Issue #39 port source SHA-256 manifest
 Code B base: 008057acd084e5452928c81bc7421baf9575d8191; source is dirty local worktree.
-GitHub main base: 4f9bb825e8da30997522cb533196c56c57ce24fb.
+GitHub main base: 83394a901dcc2c1944f083b65fc01c22e5a6602f.
 Columns: Code B worktree status | Code B source SHA-256 | reconciliation branch SHA-256 | path
 
 MODIFIED ea03f808b0236b933ffca8975698f3ac25df7fe3ff319b1f785f4c7fd1ec6f2b ea03f808b0236b933ffca8975698f3ac25df7fe3ff319b1f785f4c7fd1ec6f2b admin/admin_server.py
