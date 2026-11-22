@@ -118,8 +118,8 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
     if model != DEFAULT_EXTRACTION_MODEL or max_output_tokens != MAX_CONTENT_OUTPUT_TOKENS:
         raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
     facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
-    instructions = ("Write 3 Vietnamese property drafts, one per angle. Title <=80 chars; body <=420. "
-                    "Facts only; metadata lists <=3. Never invent legal status, ownership, amenities, returns, or rights. JSON.")
+    instructions = ("3 distinct Vietnamese drafts, one per angle. Title<=80 chars; body<=420. "
+                    "Facts only; facts_used=exact input keys. Never invent legal/ownership/amenities/returns/media rights. JSON.")
     schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:

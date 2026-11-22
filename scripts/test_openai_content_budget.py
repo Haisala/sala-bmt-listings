@@ -67,6 +67,7 @@ def main():
     size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     assert request["text"]["format"]["schema"]["properties"]["variants"]["maxItems"] == 3
     assert request["reasoning"]["effort"] == "low"
+    assert "facts_used=exact input keys" in request["instructions"]
     variant_schema = request["text"]["format"]["schema"]["properties"]["variants"]["items"]["properties"]
     assert variant_schema["title"]["maxLength"] == 80 and variant_schema["body"]["maxLength"] == 420
     assert variant_schema["facts_used"]["maxItems"] == 6
