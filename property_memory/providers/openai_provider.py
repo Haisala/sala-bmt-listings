@@ -177,6 +177,62 @@ def _response_json(response: dict[str, Any]) -> dict[str, Any]:
                     except json.JSONDecodeError: continue
     raise ProviderError("MALFORMED_STRUCTURED_OUTPUT", "Provider structured output was invalid")
 
+
+def _safe_response_diagnostics(response: dict[str, Any]) -> dict[str, Any]:
+    """Keep billing/debug metadata on malformed responses without retaining content."""
+    diagnostics: dict[str, Any] = {}
+    request_id = response.get("id")
+    if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", request_id):
+        diagnostics["provider_request_id"] = request_id
+    status = response.get("status")
+    if isinstance(status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,48}", status):
+        diagnostics["response_status"] = status
+    incomplete = response.get("incomplete_details")
+    reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+    if isinstance(reason, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", reason):
+        diagnostics["incomplete_reason"] = reason
+    error = response.get("error")
+    if isinstance(error, dict):
+        code = error.get("code") or error.get("type")
+        if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", code):
+            diagnostics["response_error_code"] = code
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        safe_usage: dict[str, Any] = {}
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                safe_usage[key] = value
+        for section, keys in (("input_tokens_details", ("cached_tokens", "cache_write_tokens")),
+                              ("output_tokens_details", ("reasoning_tokens",))):
+            values = usage.get(section)
+            if isinstance(values, dict):
+                safe_values = {key: values[key] for key in keys
+                               if isinstance(values.get(key), int) and not isinstance(values.get(key), bool) and values[key] >= 0}
+                if safe_values:
+                    safe_usage[section] = safe_values
+        if safe_usage:
+            diagnostics["usage"] = safe_usage
+    shapes = []
+    output = response.get("output")
+    if isinstance(output, list):
+        for item in output[:12]:
+            if not isinstance(item, dict):
+                continue
+            typ = item.get("type")
+            if isinstance(typ, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,48}", typ):
+                shapes.append(typ)
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content[:12]:
+                    if isinstance(part, dict):
+                        part_type = part.get("type")
+                        if isinstance(part_type, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,48}", part_type):
+                            shapes.append(part_type)
+    if shapes:
+        diagnostics["output_item_types"] = shapes[:24]
+    return diagnostics
+
 class OpenAIPropertyProvider:
     provider_name = "openai-responses"
     def __init__(self, *, api_key: str | None = None, model: str | None = None, transport: Transport | None = None, timeout: float = 30.0, usage_sink: Any | None = None):
@@ -197,7 +253,12 @@ class OpenAIPropertyProvider:
             exc.diagnostics.setdefault("model", self.model)
             exc.diagnostics.setdefault("project_header_configured", bool(os.environ.get("OPENAI_PROJECT")))
             raise
-        value = _response_json(response)
+        try:
+            value = _response_json(response)
+        except ProviderError as exc:
+            exc.diagnostics.update(_safe_response_diagnostics(response))
+            exc.diagnostics.setdefault("model", self.model)
+            raise
         usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
         value["metadata"] = {"provider": self.provider_name, "model": self.model, "request_id": response.get("id") if isinstance(response.get("id"), str) else None, "prompt_version": PROPERTY_EXTRACTION_PROMPT_VERSION, "processed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "usage": usage}
         if self.usage_sink is not None:
@@ -220,7 +281,12 @@ class OpenAIPropertyProvider:
         except ProviderError as exc:
             exc.diagnostics.setdefault("model", self.model)
             raise
-        value = _response_json(response)
+        try:
+            value = _response_json(response)
+        except ProviderError as exc:
+            exc.diagnostics.update(_safe_response_diagnostics(response))
+            exc.diagnostics.setdefault("model", self.model)
+            raise
         if not isinstance(value.get("variants"), list) or len(value["variants"]) != 3:
             raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly three variants")
         value["usage"] = response.get("usage") if isinstance(response.get("usage"), dict) else None

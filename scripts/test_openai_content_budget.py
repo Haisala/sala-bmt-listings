@@ -94,6 +94,25 @@ def main():
     except ProviderError as exc:
         assert exc.code == "MALFORMED_CONTENT_OUTPUT"
     assert bad_transport.calls == 1
+
+    class MalformedResponseTransport:
+        def send(self, payload, api_key, *, timeout):
+            return {"id": "req_TEST_ONLY_malformed", "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 71, "output_tokens": 900, "total_tokens": 971},
+                    "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "PRIVATE_MUST_NOT_LEAK"}]}]}
+
+    try:
+        OpenAIPropertyProvider(api_key="TEST_ONLY_KEY", transport=MalformedResponseTransport()).generate({"facts": {"title": "TEST_ONLY"}})
+        raise AssertionError("malformed response was accepted")
+    except ProviderError as exc:
+        assert exc.code == "MALFORMED_STRUCTURED_OUTPUT"
+        assert exc.diagnostics["provider_request_id"] == "req_TEST_ONLY_malformed"
+        assert exc.diagnostics["response_status"] == "incomplete"
+        assert exc.diagnostics["incomplete_reason"] == "max_output_tokens"
+        assert exc.diagnostics["usage"]["total_tokens"] == 971
+        assert exc.diagnostics["output_item_types"] == ["reasoning"]
+        assert "PRIVATE_MUST_NOT_LEAK" not in json.dumps(exc.diagnostics)
     print("PASS: TEST_ONLY 3-variant schema, 900 output cap, bounded input, pre-call $0.01 ceiling, model allowlist, usage/request receipt")
 
 

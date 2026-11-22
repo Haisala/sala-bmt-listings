@@ -1,6 +1,7 @@
 """Synthetic-only Admin route check for the opt-in staging Content action."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from property_memory import PropertyStore
 from property_memory.intake_review import process_intake
 from property_memory.mutation_service import ReliabilityBoundary
 from property_memory.review_center import ReviewCenter
+from property_memory.providers.openai_provider import OpenAIPropertyProvider
 
 
 class NoopM2:
@@ -109,6 +111,30 @@ def main():
         assert safe_failure["reason_codes"] == ["CONTENT_PROVIDER_ERROR_PROVIDER_4XX"]
         assert safe_failure["generation"]["provider_http_status"] == 400
         assert safe_failure["generation"]["provider_error_code"] == "model_not_found"
+
+        class MalformedResponseTransport:
+            def send(self, payload, api_key, *, timeout):
+                return {"id": "req_TEST_ONLY_malformed", "status": "incomplete",
+                        "incomplete_details": {"reason": "max_output_tokens"},
+                        "usage": {"input_tokens": 71, "output_tokens": 900, "total_tokens": 971},
+                        "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "PRIVATE_MUST_NOT_LEAK"}]}]}
+
+        malformed_sink = FakeUsage()
+        malformed = build_generative_internal_draft(
+            ai_run={"ai_run_id": "TEST_ONLY-malformed", "facts_revision_id": "facts-test-r1",
+                    "lineage": {"intake_id": "TEST_ONLY-intake"}},
+            facts=package["candidate"]["facts"], provenance_status="PASS", rights_status="APPROVED",
+            provider=OpenAIPropertyProvider(api_key="TEST_ONLY_KEY", transport=MalformedResponseTransport()),
+            model="gpt-6-luna", usage_sink=malformed_sink)
+        assert malformed["status"] == "BLOCKED"
+        assert malformed["generation"]["request_id"] == "req_TEST_ONLY_malformed"
+        assert malformed["generation"]["usage"]["total_tokens"] == 971
+        assert malformed["generation"]["provider_response_status"] == "incomplete"
+        assert malformed["generation"]["provider_incomplete_reason"] == "max_output_tokens"
+        assert malformed_sink.rows[-1]["outcome"] == "FAILED"
+        assert malformed_sink.rows[-1]["provider_request_id"] == "req_TEST_ONLY_malformed"
+        assert malformed_sink.rows[-1]["usage"]["total_tokens"] == 971
+        assert "PRIVATE_MUST_NOT_LEAK" not in json.dumps(malformed)
         store.close()
         print("PASS: TEST_ONLY Admin AI route, Gate A revision binding, exactly 3 variants, usage/request receipt, private-only state, Property Core unchanged, sanitized provider failure receipt")
 

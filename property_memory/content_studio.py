@@ -143,7 +143,23 @@ def build_generative_internal_draft(*, ai_run: dict[str, Any], facts: dict[str, 
             error_code = diagnostics.get("error_code")
             if isinstance(error_code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", error_code):
                 generation["provider_error_code"] = error_code
-        return blocked("CONTENT_PROVIDER_ERROR_" + reason)
+            response_status = diagnostics.get("response_status")
+            if isinstance(response_status, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,48}", response_status):
+                generation["provider_response_status"] = response_status
+            incomplete_reason = diagnostics.get("incomplete_reason")
+            if isinstance(incomplete_reason, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", incomplete_reason):
+                generation["provider_incomplete_reason"] = incomplete_reason
+            output_types = diagnostics.get("output_item_types")
+            if isinstance(output_types, list):
+                generation["provider_output_item_types"] = [x for x in output_types if isinstance(x, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,48}", x)][:24]
+            request_id = diagnostics.get("provider_request_id")
+            if not isinstance(request_id, str):
+                request_id = None
+            usage = diagnostics.get("usage") if isinstance(diagnostics.get("usage"), dict) else None
+        else:
+            request_id = None
+            usage = None
+        return blocked("CONTENT_PROVIDER_ERROR_" + reason, usage, request_id)
     usage = response.get("usage") if isinstance(response, dict) and isinstance(response.get("usage"), dict) else None
     request_id = response.get("provider_request_id") if isinstance(response, dict) and isinstance(response.get("provider_request_id"), str) else None
     variants = response.get("variants") if isinstance(response, dict) else None
