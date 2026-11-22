@@ -40,8 +40,11 @@ class StorageToolsTests(unittest.TestCase):
         backup(self.source, snapshot)
         restore(snapshot, restored)
         recovered = Application(restored, PASSWORD, {ORIGIN})
-        items = json.loads(recovered.handle("GET", "/api/listings?q=TEST_ONLY").body)["items"]
+        items = recovered.store.list_all()
         self.assertEqual([x["listing_id"] for x in items], [self.listing_id])
+        # A legacy-approved row is restored intact but must not become public
+        # without the separately configured Admin projection.
+        self.assertEqual(recovered.handle("GET", "/api/listings?q=TEST_ONLY").status, 503)
         self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
         self.assertEqual(restored.stat().st_mode & 0o777, 0o600)
         self.assertEqual(snapshot.parent.stat().st_mode & 0o777, 0o700)
