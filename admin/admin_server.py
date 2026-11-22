@@ -76,7 +76,29 @@ _ANALYTICS_RATE_LOCK = threading.Lock()
 _ANALYTICS_RATE_TIMES: deque[float] = deque()
 _AI_ENABLED = os.environ.get("BMT_OPENAI_EXTRACTION", "0").strip().lower() in {"1", "true", "yes"}
 _CONTENT_LIVE_ENABLED = os.environ.get("BMT_OPENAI_CONTENT_LIVE", "0").strip().lower() in {"1", "true", "yes"}
-_USAGE_LEDGER = UsageLedger(PRIVATE_ROOT / "provider-usage.sqlite3")
+class LazyUsageLedger:
+    """Open the private usage database only when a usage operation is requested."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._instance: UsageLedger | None = None
+        self._lock = threading.Lock()
+
+    def _get(self) -> UsageLedger:
+        if self._instance is None:
+            with self._lock:
+                if self._instance is None:
+                    self._instance = UsageLedger(self.path)
+        return self._instance
+
+    def record(self, **kwargs: Any) -> dict[str, Any]:
+        return self._get().record(**kwargs)
+
+    def report(self, **kwargs: Any) -> dict[str, Any]:
+        return self._get().report(**kwargs)
+
+
+_USAGE_LEDGER = LazyUsageLedger(PRIVATE_ROOT / "provider-usage.sqlite3")
 _AI_PROVIDER = OpenAIPropertyProvider(usage_sink=_USAGE_LEDGER)
 AI_GATEWAY = AIGateway(provider=_AI_PROVIDER, enabled=_AI_ENABLED, allowed_models={_AI_PROVIDER.model}, model=_AI_PROVIDER.model, max_requests=int(os.environ.get("BMT_OPENAI_MAX_REQUESTS", "1")))
 
