@@ -87,6 +87,16 @@ Nguồn đầy đủ: [MASTER 5 PHASE #7058182954](https://github.com/Haisala/sa
 - **Không đổi mục tiêu cấp trên:** một phiên Owner login bằng mật khẩu hiện tại, một Property Master, Web Admin là phân hệ xuất bản/bảo trì. Code release khác data; rollback mã không ghi đè dữ liệu thật. Giữ AI9/Content/provider có ích nhưng dormant theo D06.
 - **Gate bước này:** chỉ công nhận `LOCAL_SYNTHETIC_PROJECTION_INTEGRATION` khi file/commit và test positive/negative có receipt. Đây **không phải** `FIRST_WEB_CORE_READY_TO_SKIN`, `Phase1_UNIFIED_PASS`, `staging` hoặc `production` acceptance.
 
+## D09 — Owner GO kiểm thử HTTP E2E giữa hai tiến trình cô lập — APPROVED 22/11/2026
+
+**Căn cứ:** [Codex RESULT source TEST_ONLY #7072170795](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072170795) trên [PR #44](https://github.com/Haisala/sala-bmt-listings/pull/44), **[Owner GO kiểm thử sandbox HTTP #7072250230](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072250230)**.
+
+- **Owner duyệt công đoạn thực thi giới hạn:** Codex dựng **Admin synthetic + Customer synthetic từ đúng PR #44 HEAD** trong sandbox/private temporary root, hai tiến trình loopback/cổng trống riêng, không dùng credential hay dữ liệu thật. Chạy **E2E HTTP thực** từ Gate A + quyền media + Owner publication → staging artifact approved → Customer feed/search/detail/media; kiểm revoked/stale/invalid-source/no-legacy-fallback, quyền âm tính và dấu vết request/response. Có quyền thêm harness/test hoặc sửa lỗi nhỏ an toàn **trên nhánh review PR #44**, không tạo hệ thống dữ liệu/đăng nhập mới.
+- **Ranh giới tuyệt đối:** KHÔNG restart hoặc thay runtime Admin `:18876`, Customer `:18877`, không động property/customer/media/SQLite thật, không động launch agent, Pages, DNS, tunnel, apex, `staging.haisala.io.vn`, `main`, không merge, không bật API AI, không chuyển/xóa legacy B hoặc thay auth thật. Quyết định giữ AI9/Content/provider hữu ích nhưng dormant tiếp tục hiệu lực.
+- **Safety gate:** kiểm chứng cô lập trước khi bind và trước mọi test; thiếu quyền, cổng hoặc config an toàn thì `BLOCKED`, không chạy thử vào runtime thật. Không suy từ kiểm thử in-process hoặc HTTP GET health riêng thành E2E thành công.
+- **Đây là `ISOLATED_HTTP_E2E` trên loopback, KHÔNG phải GO official Phase 2 staging/deploy/HTTPS, không chứng minh single-session, traffic-event chiều về hoặc `FIRST_WEB_CORE_READY_TO_SKIN`.** Phase 1 unified `NOT_VERIFIED` và Phase 2 `NO_GO` giữ nguyên cho tới khi có receipt đáp ứng toàn gate Master 5 Phase và phép Owner riêng.
+- **Giao nhận:** một RESULT Issue #39 có fingerprint nguồn/tiến trình, HTTP status từng cạnh, test negative, SHA, no real-data IO, handoff PR branch và một next action. Chỉ cập nhật trạng thái sau khi đối chiếu báo cáo mới.
+
 ## Lưu ý về authority
 
 [Blueprint V1.0](../SALA_BDS_MASTER_SYSTEM_WEB_FIRST_BLUEPRINT_V1_OWNER_APPROVED.md) là **design target**; các quyết định Owner sau đó trong [Issue #39](https://github.com/Haisala/sala-bmt-listings/issues/39) và [Issue #38](https://github.com/Haisala/sala-bmt-listings/issues/38) bổ sung/thay thế trong **đúng phạm vi**. Không biến thiết kế cũ AI9 chín khối thành lệnh chạy chín API hoặc ép hoàn thành các phân hệ khác trước First Web. Phần lịch sử mô tả Issue trước chuẩn hóa được giữ nguyên tại [archive](./SALA_BDS_ISSUE39_PRE_3T_ARCHIVE.md).
