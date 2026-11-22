@@ -407,9 +407,12 @@ def run_e2e() -> None:
         check(store.get(property_id) == core_before_publication and len(store.list_properties()) == count_before_publication,
               "property_core_unchanged_by_web_publication", evidence)
 
-        status, _, feed_raw = request(customer_origin + "/api/listings?q=TEST_ONLY")
+        status, _, feed_raw = request(customer_origin + "/api/listings")
         feed = json.loads(feed_raw)
-        check(status == 200 and len(feed.get("items", [])) == 1, "customer_http_search_feed", evidence, f"HTTP {status}")
+        check(status == 200 and len(feed.get("items", [])) == 1, "customer_http_feed", evidence, f"HTTP {status}")
+        status, _, search_raw = request(customer_origin + "/api/listings?q=TEST_ONLY")
+        search = json.loads(search_raw)
+        check(status == 200 and len(search.get("items", [])) == 1, "customer_http_search", evidence, f"HTTP {status}")
         listing = feed["items"][0]
         check(listing["property_id"] == property_id and listing["property_revision"] == 1 and listing["projection_id"] == rows[0]["projectionId"],
               "feed_identity_and_revision_linkage", evidence)
