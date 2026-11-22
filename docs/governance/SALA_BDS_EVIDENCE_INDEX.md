@@ -126,8 +126,16 @@
 - **Gate:** `PR44_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`; one-session, events/CTA back, release safety and READY_TO_SKIN chưa chứng minh.
 - **ONE NEXT:** Owner chấp thuận **thêm một lượt quyền giới hạn** chạy harness đã sửa ở exact PR HEAD `b798aa7` và báo đầy đủ HTTP matrix. Quyền lượt trước đã dùng hết; trước GO riêng không tự chạy lại.
 
+## 6.6 Owner GO repeated isolated HTTP E2E — TASK POSTED, no new test RESULT
+
+- **Owner decision / TASK:** [#7072619842](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072619842) authorizes **repeated attempts without a new Owner GO per attempt** for *this same* isolated loopback TEST_ONLY HTTP E2E task; continuation of [PARTIAL RESULT #7072568397](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072568397).
+- **Baseline:** [PR #44](https://github.com/Haisala/sala-bmt-listings/pull/44) `b798aa7374c7712ac90a1bcf23b9b3f50e1ba952` DRAFT/UNMERGED. Harness login-key assertion corrected after last attempt, **not rerun** at time of posting. Prior real socket proof two synthetic listeners and health 200; remaining Gate A → publication → feed/detail/media → revoke `NOT_RUN`.
+- **Authorization vs permission:** Owner authorizes repeated scope-bound trials; **no evidence sandbox permission is automatically granted or persistent**. Codex must obtain allowed runtime permission via its execution mechanism, and must not disable sandbox or access real property DB/media/credentials/ports/services.
+- **Acceptance:** actual HTTP E2E matrix+negative cases with process/source SHA, temp-only data, repeat run receipts, teardown proof and no real data; one Codex RESULT on Issue #39 when settled. **Status now `TASK_POSTED`, not `HTTP_E2E_PASS`.**
+- **Gates:** `PR44_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO` until separate proof and Owner decision.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Owner quyết định cấp lại một lượt quyền scoped loopback cho harness đã sửa ở PR #44 head b798aa7 để chạy tiếp HTTP E2E, sau RESULT PARTIAL #7072568397; Phase 2 vẫn NO_GO.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Codex thực hiện lại harness đã sửa trong quyền scoped loopback được cơ chế thực thi cấp, có thể lặp nhiều lượt trong cùng task theo Owner GO #7072619842; ghi một RESULT có HTTP matrix. Phase 2 vẫn NO_GO.
