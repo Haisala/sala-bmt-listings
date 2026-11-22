@@ -129,6 +129,7 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
                    "output_count": 3}
         request = {"model": model, "instructions": instructions,
                    "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
+                   "reasoning": {"effort": "low"},
                    "max_output_tokens": max_output_tokens,
                    "text": {"format": {"type": "json_schema", "name": "content_studio_three", "strict": True,
                                         "schema": CONTENT_RESPONSE_SCHEMA}}}

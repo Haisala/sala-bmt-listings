@@ -66,6 +66,7 @@ def main():
     assert len(sent_facts.get("description", "")) <= 160
     size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     assert request["text"]["format"]["schema"]["properties"]["variants"]["maxItems"] == 3
+    assert request["reasoning"]["effort"] == "low"
     input_upper_bound = (len(request["instructions"].encode()) + len(request["input"].encode())
                          + len(json.dumps(request["text"]["format"]["schema"], separators=(",", ":")).encode())
                          + len("content_studio_three"))
