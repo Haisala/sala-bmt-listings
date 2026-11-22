@@ -291,9 +291,58 @@ def main() -> None:
         html_page = handler.wfile.getvalue().decode("utf-8")
         assert response["status"] == 200 and "Duyệt công bố riêng" in html_page
         assert "data-release-approve" in html_page and "data-release-revoke" in html_page
-        assert "content-studio" in html_page and "Tạo 3 bản nháp" in html_page
+        assert "content-studio" in html_page and "Tạo 3 mẫu bằng AI" in html_page
         assert "min-height:44px;flex:1 1 180px" in html_page and 'name="viewport"' in html_page
         assert store.get(property_id)["property_revision"] == 2
+
+        # Owner-only media-rights promotion is staging-only, hash-checked, and idempotent.
+        import base64
+        prior_env = os.environ.get("BMT_ENV")
+        staging_root = root / "staging-root"
+        staging_root.mkdir(mode=0o700)
+        os.environ["BMT_ENV"] = "staging"
+        os.environ["BMT_ADMIN_STAGING_ROOT"] = str(staging_root)
+        os.environ["BMT_ADMIN_PUBLIC_ASSETS_ROOT"] = str(staging_root / "public-assets")
+        media_intake = fake_intake("intake-test-only-media-rights")
+        media_intake["preliminaryFacts"]["road_access"] = "TEST_ONLY road"
+        photo = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWQ0AAAAASUVORK5CYII=")
+        media_digest = __import__("hashlib").sha256(photo).hexdigest()
+        media_ref = f"inbox/{media_intake['id']}/front.png"
+        media_path = root / "admin-private" / media_ref
+        media_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        media_path.write_bytes(photo); media_path.chmod(0o600)
+        media_intake["media"] = [{"mediaId": "media-" + media_digest[:24], "filename": "front.png", "path": media_ref, "sha256": media_digest, "bytes": len(photo), "role": "photo"}]
+        media_package = process_intake(store, center, media_intake)
+        media_approved = center.approve(media_package["review_id"], expected_revision=1, owner_id="owner-primary", decision="CREATE_NEW_PROPERTY", idempotency_key="gate-a-media-rights-test")
+        media_review_id = media_approved["review_id"]
+        media_property_id = media_approved["mutation_result"]["property_id"]
+        media_appearance_id = store.list_source_appearances(media_property_id)[0]["appearance_id"]
+        media_property_before = store.get(media_property_id)
+        rights_payload = {"property_id": media_property_id, "expected_property_revision": 1, "appearance_id": media_appearance_id, "rights_status": "PERSONAL"}
+        def rights_call(owner):
+            response = {}
+            handler = adm.Handler.__new__(adm.Handler)
+            handler.owner_id = lambda: owner
+            handler.send_json = lambda value, status=200, headers=None: response.update(value=value, status=status)
+            handled = handler.review_route_post(f"/api/reviews/{media_review_id}/media-rights", json.dumps(rights_payload).encode())
+            assert handled is True
+            return response
+        assert rights_call(None)["status"] == 403
+        media_rights_result = rights_call("owner-primary")
+        assert media_rights_result["status"] == 201 and media_rights_result["value"]["published"] is False
+        media_replay = rights_call("owner-primary")
+        assert media_replay["status"] == 201 and media_replay["value"].get("idempotent_replay") is True, media_replay
+        media_rows = [x for x in store.list_media_history(media_property_id) if x.get("appearance_id") == media_appearance_id]
+        assert len([x for x in media_rows if x["active"]]) == 1
+        public_media = next(x for x in media_rows if x["active"])
+        assert public_media["media_ref"].startswith("assets/images/")
+        assert (staging_root / "public-assets" / public_media["media_ref"]).read_bytes() == photo
+        assert adm._media_rights_allowed(store, media_property_id, media_appearance_id)
+        assert store.get(media_property_id) == media_property_before
+        if prior_env is None: os.environ.pop("BMT_ENV", None)
+        else: os.environ["BMT_ENV"] = prior_env
+        os.environ.pop("BMT_ADMIN_STAGING_ROOT", None)
+        os.environ.pop("BMT_ADMIN_PUBLIC_ASSETS_ROOT", None)
 
         print("PUBLIC_RELEASE_ADMIN_PASS: Owner session + CSRF/origin, body spoof rejection, Gate A/review/Core revision binding, duplicate/replay, rights/conflict fail-closed, optional legal status, private Website preview, revision refresh, revoke, rollback, unchanged canonical count/revisions, Admin responsive controls")
 
