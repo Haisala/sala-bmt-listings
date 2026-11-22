@@ -97,6 +97,15 @@ Nguồn đầy đủ: [MASTER 5 PHASE #7058182954](https://github.com/Haisala/sa
 - **Đây là `ISOLATED_HTTP_E2E` trên loopback, KHÔNG phải GO official Phase 2 staging/deploy/HTTPS, không chứng minh single-session, traffic-event chiều về hoặc `FIRST_WEB_CORE_READY_TO_SKIN`.** Phase 1 unified `NOT_VERIFIED` và Phase 2 `NO_GO` giữ nguyên cho tới khi có receipt đáp ứng toàn gate Master 5 Phase và phép Owner riêng.
 - **Giao nhận:** một RESULT Issue #39 có fingerprint nguồn/tiến trình, HTTP status từng cạnh, test negative, SHA, no real-data IO, handoff PR branch và một next action. Chỉ cập nhật trạng thái sau khi đối chiếu báo cáo mới.
 
+## D10 — Owner cho phép xin quyền loopback cô lập để gỡ HTTP_BIND_BLOCKED — APPROVED 22/11/2026
+
+**Bằng chứng:** [RESULT BLOCKED #7072294543](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072294543) / [Owner GO xử lý môi trường #7072339267](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072339267).
+
+- Owner phê duyệt cho **Codex đề nghị quyền thực thi giới hạn mở hai cổng `127.0.0.1` riêng bằng cơ chế approval chính thức của môi trường**, chỉ phục vụ một lần kiểm thử TEST_ONLY isolated HTTP E2E từ PR #44 theo task #7072250230. Nếu phiên đó không hỗ trợ quyền phù hợp, xác định môi trường được phê duyệt khác hoặc STOP và nêu chính xác bước Owner phải thao tác.
+- **Không đồng nghĩa quyền đã được cấp**, không khắc phục `PermissionError` bằng comment GitHub hoặc đổi lệnh chạy trong sandbox cũ. Không tự bật full network/full disk, tắt sandbox, chiếm cổng `:8765/:18876/:18877`, sửa main, động dữ liệu/credential thật, dịch vụ đang chạy hoặc hệ thống khác.
+- Quyết định này **chỉ gỡ blocker môi trường**; không cho phép merge, release, production/staging public hay chuyển Phase 2. `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`, `PR_MERGE_GO=NO`.
+- Khi có quyền thực và test, Codex phải lập RESULT gồm proof bind/socket/process SHA, test HTTP từng cạnh, dữ liệu synthetic và clean teardown; không dùng test in-process trước đó thay E2E.
+
 ## Lưu ý về authority
 
 [Blueprint V1.0](../SALA_BDS_MASTER_SYSTEM_WEB_FIRST_BLUEPRINT_V1_OWNER_APPROVED.md) là **design target**; các quyết định Owner sau đó trong [Issue #39](https://github.com/Haisala/sala-bmt-listings/issues/39) và [Issue #38](https://github.com/Haisala/sala-bmt-listings/issues/38) bổ sung/thay thế trong **đúng phạm vi**. Không biến thiết kế cũ AI9 chín khối thành lệnh chạy chín API hoặc ép hoàn thành các phân hệ khác trước First Web. Phần lịch sử mô tả Issue trước chuẩn hóa được giữ nguyên tại [archive](./SALA_BDS_ISSUE39_PRE_3T_ARCHIVE.md).
