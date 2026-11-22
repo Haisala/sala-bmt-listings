@@ -100,8 +100,17 @@
 - **Lúc Codex báo:** đối chiếu TASK URL, commit HEAD/patch, process/port fingerprint, test matrix và HTTP status, temp-only data proof, không chạm runtime hoặc DB thật; lưu receipt tại đây rồi thay checkpoint Tầng 1. Nếu chỉ có in-process test thì không công nhận E2E HTTP; nếu sandbox bind bị chặn thì `BLOCKED` minh bạch.
 - **Gate giữ nguyên:** `PHASE_1_UNIFIED=NOT_VERIFIED`; `PHASE_2=NO_GO`; `PR_MERGE_GO=NO`; chưa single-session, traffic chiều về, HTTPS/physical hoặc READY_TO_SKIN.
 
+## 6.3 RESULT isolated HTTP E2E — `HTTP_BIND_BLOCKED` (22/11/2026)
+
+- **TASK:** [Owner GO #7072250230](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072250230). **RESULT:** [Codex #7072294543](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072294543) — `STATUS=ISOLATED_HTTP_E2E_BLOCKED`. **PR #44 HEAD:** [`bf7ebca0353ad2bf74b169b3c11a65f1bd2e05c0`](https://github.com/Haisala/sala-bmt-listings/commit/bf7ebca0353ad2bf74b169b3c11a65f1bd2e05c0); [handoff theo SHA](https://github.com/Haisala/sala-bmt-listings/blob/bf7ebca0353ad2bf74b169b3c11a65f1bd2e05c0/docs/ISSUE39_LAST_72H_HANDOFF.md), PR OPEN/DRAFT/UNMERGED.
+- **Bằng chứng quyền môi trường:** `lsof` read-only thấy PID 877 trên `:8765`, PID 31952 trên `:18876`, PID 89406 trên `:18877` ở trước/sau lượt kiểm. **Lần bind loopback ephemeral đầu tiên bị `PermissionError: [Errno 1] Operation not permitted`**; không có lần bind thứ hai. Đây là `HTTP_BIND_BLOCKED` do quyền, **không phải cổng bị chiếm** hoặc lỗi nghiệp vụ.
+- **KHÔNG ĐƯỢC NHẬN PASS E2E:** chưa khởi động Admin/Customer sandbox, **không có HTTP request E2E**, mọi cạnh Gate A/publication/projection/feed/detail/media/stale/revoke `NOT_RUN`. `TEST_ONLY_RECORD_COUNTS=0`, `ARTIFACT_HASH=NOT_CREATED`; in-process synthetic tests cũ #7072170795 vẫn riêng biệt, không thể dùng thay E2E HTTP.
+- **Safety theo báo cáo:** không app imports/creds, không dữ liệu thật, không writes/restarts/process changes, không DNS/tunnel/deploy/API calls, chỉ handoff doc commit và `git diff --check PASS`. **Không xác nhận tự kiểm runtime** ngoài receipt Codex.
+- **Trạng thái hiện hành:** `PR_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`; không chứng minh one-session, traffic/CTA return, staging HTTPS, READY_TO_SKIN.
+- **Một việc ưu tiên tiếp theo:** Owner cấp/duyệt môi trường chạy Codex có quyền bind loopback TCP để **chạy lại đúng nhiệm vụ TEST_ONLY E2E cô lập**; tuyệt đối không sử dụng cổng đang chạy làm đường vòng hoặc nới quyền hệ thống khác. Không tự triển khai.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Đối chiếu RESULT Codex cho Owner GO #7072250230 về HTTP E2E qua hai tiến trình cô lập. Việc giao chưa tạo PASS; Phase 2 vẫn NO_GO.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Owner cấp/duyệt môi trường Codex cho phép loopback bind để rerun đúng isolated HTTP E2E sau `HTTP_BIND_BLOCKED` trong RESULT #7072294543; không mở Phase 2.
