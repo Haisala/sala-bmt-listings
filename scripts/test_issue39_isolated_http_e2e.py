@@ -232,6 +232,10 @@ def run_child() -> None:
 
 
 def run_e2e() -> None:
+    # Running a script by filename places ``scripts/`` at sys.path[0]; add the
+    # checkout root explicitly so the parent harness can inspect its isolated DB.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     evidence: dict[str, Any] = {"source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}
     source_hashes = {}
     for relative in ("admin/admin_server.py", "customer_web_v2/sala_web.py", "customer_web_v2/projection_reader.py", "customer_web_v2/public_contract.py"):
