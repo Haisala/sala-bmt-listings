@@ -67,8 +67,19 @@
 - [Archive nguyên văn Issue #39 trước chuẩn hóa](./SALA_BDS_ISSUE39_PRE_3T_ARCHIVE.md) — bao gồm CURRENT MASTER MAP dài và AUDIT gốc, chỉ tham chiếu lịch sử. Các comment/MASTER quyết định trên Issue #39 tiếp tục giữ nguyên.
 - [Blueprint gốc](../SALA_BDS_MASTER_SYSTEM_WEB_FIRST_BLUEPRINT_V1_OWNER_APPROVED.md) — bản thiết kế, không phải code/runtime receipt.
 
+## 6. Admin ↔ Customer Web — audit thực tế và Owner GO mới (22/11/2026)
+
+- **TASK đối chiếu trước:** [Owner #7071752485](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071752485).
+- **RESULT:** [Codex #7071851933](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071851933); [ma trận, runtime và phân quyền chi tiết — handoff @ `baee5e4`](https://github.com/Haisala/sala-bmt-listings/blob/baee5e4ee0611c2760985df9b5641b5765b74c01/docs/ISSUE39_LAST_72H_HANDOFF.md).
+- **Quan sát thực từ báo cáo Codex:** Admin A tại `127.0.0.1:18876` GET health 200, Customer B tại `127.0.0.1:18877` GET health 200; apex `https://haisala.io.vn` trả trang “Website đang được xây dựng”. Hai runtime khác nhau; fingerprint process CWD được ghi trong handoff, chưa đồng nhất source PR với runtime.
+- **Năm nhóm code authority overlap:** đăng nhập/session, intake/edit/media, identity/Property Core, review/Gate A, công khai/Website publication gate. Customer B có SQLite riêng `properties/listings/revisions/media/provenance`, login/session riêng; Admin A có Core/review/public-release. Đây là **trùng trách nhiệm triển khai**, KHÔNG có bằng chứng bản ghi/data thật bị trùng (không đọc DB).
+- **Chưa có:** B ↔ Admin canonical-approved projection read path, true single session, analytics event receipt; Customer B có public feed dựa store riêng, chưa qua Web publication Admin; PR #44 chưa merge. Audit chỉ có HTTP GET và source review, **không thực thi E2E test mới**.
+- **Trạng thái PR tại report:** PR #44 head `baee5e4ee0611c2760985df9b5641b5765b74c01` thêm handoff, DRAFT/UNMERGED; GitHub `mergeable` dao động, không phải review PASS.
+- **Owner GO mới — TASK:** [#7071923255](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071923255) phê duyệt **increment đầu tiên**: B public đọc Admin-approved projection bằng adapter nhỏ + synthetic-only tests trên review branch; bắt buộc preservation plan, **không** đọc/đụng dữ liệu thật, retire routes, merge hoặc deploy. **TASK_POSTED, CODEX_RESULT_NOT_YET_VERIFIED**.
+- **Khi kết quả tới:** đối chiếu route/contract/file SHA, negative tests unapproved/stale/revoked/private media/failed source/no fallback B store, ngăn ghi production; không nâng Phase 1 unified hay Phase 2 khi chỉ local test.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1 / PR #44 review PARTIAL; dữ liệu quản trị GitHub only. **BƯỚC TIẾP THEO DUY NHẤT:** áp dụng khóa Owner “giữ mã hữu ích, không kích hoạt” trong đánh giá scope của PR #44, rồi xác minh các blocker integration trước khi Owner quyết định merge/Phase 2.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1 / PR #44 review PARTIAL; dữ liệu quản trị GitHub only. **BƯỚC TIẾP THEO DUY NHẤT:** chờ RESULT từ Owner GO #7071923255 về việc nối Customer Web public read-only vào Admin-approved projection bằng mã và synthetic tests an toàn; trước kết quả đó không đổi gate Phase 2.
