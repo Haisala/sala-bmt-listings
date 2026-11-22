@@ -92,8 +92,16 @@
 
 **MỘT NEXT ACTION:** Owner xem xét kết quả kiểm thử cục bộ và quyết định có cấp quyền riêng cho cấu hình staging cô lập + E2E thật giữa Admin-approved projection và Customer Web hay chưa. Không tự mở gate, merge hoặc loại bỏ đường dữ liệu cũ.
 
+## 6.2 Owner GO isolated HTTP E2E — TASK giao, CHƯA CÓ RESULT
+
+- **TASK:** [Owner #7072250230](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072250230), kế thừa [RESULT source TEST_ONLY #7072170795](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072170795). Source baseline khi giao: PR #44 HEAD `7aaa5a84579e8995329081cff254baf7f2fad438`, DRAFT/UNMERGED, synthetic 4/4 + Customer 13/13 theo Codex. Codex bắt buộc xác minh HEAD lúc bắt đầu.
+- **Được giao:** cấu hình **hai tiến trình synthetic HTTP** từ source review branch trong temp/private root tách riêng, chỉ 127.0.0.1 và cổng mới; kiểm Gate A → Web-publication → approved projection → Customer feed/search/detail/media và fail-closed, revoked/stale/rights/no fallback, cleanup, không đụng services thực :18876/:18877 và domain.
+- **Tình trạng tại lúc cập nhật:** `TASK_POSTED`; **chưa có RESULT mới, chưa có biên bản chạy HTTP E2E, chưa chứng minh staging thật hoặc official Phase 2.** Không coi GO là PASS.
+- **Lúc Codex báo:** đối chiếu TASK URL, commit HEAD/patch, process/port fingerprint, test matrix và HTTP status, temp-only data proof, không chạm runtime hoặc DB thật; lưu receipt tại đây rồi thay checkpoint Tầng 1. Nếu chỉ có in-process test thì không công nhận E2E HTTP; nếu sandbox bind bị chặn thì `BLOCKED` minh bạch.
+- **Gate giữ nguyên:** `PHASE_1_UNIFIED=NOT_VERIFIED`; `PHASE_2=NO_GO`; `PR_MERGE_GO=NO`; chưa single-session, traffic chiều về, HTTPS/physical hoặc READY_TO_SKIN.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Owner quyết định riêng về staging cô lập + E2E thực sau khi xem RESULT #7072170795; trước quyết định đó Phase 2 NO_GO.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Đối chiếu RESULT Codex cho Owner GO #7072250230 về HTTP E2E qua hai tiến trình cô lập. Việc giao chưa tạo PASS; Phase 2 vẫn NO_GO.
