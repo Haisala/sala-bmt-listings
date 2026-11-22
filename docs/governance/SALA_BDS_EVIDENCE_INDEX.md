@@ -78,8 +78,22 @@
 - **Owner GO mới — TASK:** [#7071923255](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071923255) phê duyệt **increment đầu tiên**: B public đọc Admin-approved projection bằng adapter nhỏ + synthetic-only tests trên review branch; bắt buộc preservation plan, **không** đọc/đụng dữ liệu thật, retire routes, merge hoặc deploy. **TASK_POSTED, CODEX_RESULT_NOT_YET_VERIFIED**.
 - **Khi kết quả tới:** đối chiếu route/contract/file SHA, negative tests unapproved/stale/revoked/private media/failed source/no fallback B store, ngăn ghi production; không nâng Phase 1 unified hay Phase 2 khi chỉ local test.
 
+## 6.1 RESULT Owner GO #7071923255 — Admin projection → Customer public read (22/11/2026)
+
+**TASK:** [Owner GO #7071923255](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071923255). **RESULT:** [Codex #7072170795](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072170795), **commit/PR HEAD** [`7aaa5a84579e8995329081cff254baf7f2fad438`](https://github.com/Haisala/sala-bmt-listings/commit/7aaa5a84579e8995329081cff254baf7f2fad438), [handoff tại đúng SHA](https://github.com/Haisala/sala-bmt-listings/blob/7aaa5a84579e8995329081cff254baf7f2fad438/docs/ISSUE39_LAST_72H_HANDOFF.md). [PR #44](https://github.com/Haisala/sala-bmt-listings/pull/44) OPEN/DRAFT/UNMERGED. Trạng thái `mergeable` từ GitHub là kỹ thuật và biến động, không phải Owner GO merge.
+
+**Đã kiểm tra mã trên PR head:** `customer_web_v2/projection_reader.py` đọc chỉ artifact `SALA_PUBLIC_PROJECTION_PATH`, kiểm DTO công khai/quyền ảnh, ràng buộc identity/revision, từ chối nguồn không hợp lệ; `customer_web_v2/sala_web.py` chuyển GET `/api/listings`, detail, `/media` sang reader, trả HTTP 503 nếu thiếu artifact và **không fallback Customer SQLite**. `customer_web_v2/public_contract.py` làm validator dùng lại cho `property_memory/public_contract_adapter.py`; `admin/admin_server.py` bổ sung dọn preview stale khi Gate A thay đổi. **Đây là thay đổi source trên nhánh PR, không phải runtime deployed.**
+
+**TEST_ONLY theo RESULT Codex:** synthetic integration 4/4 PASS, Customer Web 13/13 PASS, Admin public-release suite PASS; py_compile, ResourceWarning và diff check PASS. Các kiểm thử đã mô tả: chưa Gate A; chưa Web-publish; approved revision đúng ID/rights; stale revision; revoke/unpublish; private fields/media; replay; malformed/unavailable projection 503; import không ghi private root. Đối chiếu test và source ở commit trên; đây **không phải chứng nhận thử trên Mac runtime đang chạy**.
+
+**Giữ nguyên:** B SQLite và Owner/login/intake/edit/review routes còn tồn tại để tránh mất dữ liệu, nhưng không là nguồn public feed ở *source mới*; chưa đọc/di chuyển/xóa dữ liệu thật, không merge/deploy/restart. Bản sản xuất/localhost cũ chưa áp cấu hình `SALA_PUBLIC_PROJECTION_PATH`. **Chưa chứng minh** một phiên đăng nhập, E2E runtime kết nối từ Admin tới Customer, traffic-event chiều về, bảo toàn DB/backup/restore thực nghiệm, staging HTTPS, READY_TO_SKIN, Phase 1 unified hoặc Phase 2.
+
+**KẾT LUẬN:** `ACTUAL_CHANGE=IMPLEMENTED_TEST_ONLY`, `PR44_REVIEW=PARTIAL`, `PR_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`.
+
+**MỘT NEXT ACTION:** Owner xem xét kết quả kiểm thử cục bộ và quyết định có cấp quyền riêng cho cấu hình staging cô lập + E2E thật giữa Admin-approved projection và Customer Web hay chưa. Không tự mở gate, merge hoặc loại bỏ đường dữ liệu cũ.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1 / PR #44 review PARTIAL; dữ liệu quản trị GitHub only. **BƯỚC TIẾP THEO DUY NHẤT:** chờ RESULT từ Owner GO #7071923255 về việc nối Customer Web public read-only vào Admin-approved projection bằng mã và synthetic tests an toàn; trước kết quả đó không đổi gate Phase 2.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Owner quyết định riêng về staging cô lập + E2E thực sau khi xem RESULT #7072170795; trước quyết định đó Phase 2 NO_GO.
