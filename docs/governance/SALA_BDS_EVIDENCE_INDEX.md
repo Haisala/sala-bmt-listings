@@ -134,8 +134,18 @@
 - **Acceptance:** actual HTTP E2E matrix+negative cases with process/source SHA, temp-only data, repeat run receipts, teardown proof and no real data; one Codex RESULT on Issue #39 when settled. **Status now `TASK_POSTED`, not `HTTP_E2E_PASS`.**
 - **Gates:** `PR44_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO` until separate proof and Owner decision.
 
+## 6.7 RESULT retry authorization blocked — cần Owner cấp quyền trong giao diện Codex (22/11/2026)
+
+- **TASK:** [Owner GO chạy nhiều lượt #7072619842](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072619842). **RESULT:** [Codex #7072642067](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072642067): `STATUS=BLOCKED_PERMISSION_PENDING_USER_ACTION`.
+- **Code/PR:** PR #44 `codex/issue39-source-reconciliation` HEAD `b798aa7374c7712ac90a1bcf23b9b3f50e1ba952`, DRAFT/UNMERGED. Harness đã sửa login assertion, `py_compile` và `git diff --check` PASS theo Codex, nhưng **không được rerun**.
+- **Blocker:** Codex yêu cầu scoped `require_escalated` cho đúng lệnh `python3 scripts/test_issue39_isolated_http_e2e.py` (hai cổng loopback ephemeral, synthetic-only). Automatic approval review **từ chối** vì comment Owner trên GitHub không được chấp nhận là quyền elevated retry và grant trước đã dùng hết. `PERMISSION_NOT_GRANTED`: không có bind, HTTP request, child process, temp data mới. Đây không phải code E2E FAIL.
+- **Giữ bằng chứng trước:** [PARTIAL #7072568397](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072568397) là run duy nhất có loopback HTTP health 200 + Customer login HTTP 200, nhưng Gate A/Web publication/Customer projection/revoke vẫn `NOT_RUN`. Không gán `HTTP_E2E_PASS`.
+- **Safety:** Codex nói không lách sandbox, không dùng listener thật `:8765/:18876/:18877`, không động dữ liệu thật, DNS/production hay dự án khác. Không có commit/mã thay đổi ở lần retry này.
+- **Gates:** `PR_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`.
+- **ONE_NEXT_ACTION:** Owner phải thực hiện thao tác **phê duyệt elevated loopback riêng cho harness trong giao diện Codex**. Chỉ khi được cấp quyền thực mới tiếp tục chạy lại; không đăng thêm comment GO tương đương để kỳ vọng tự mở sandbox.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Codex thực hiện lại harness đã sửa trong quyền scoped loopback được cơ chế thực thi cấp, có thể lặp nhiều lượt trong cùng task theo Owner GO #7072619842; ghi một RESULT có HTTP matrix. Phase 2 vẫn NO_GO.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Owner cấp quyền elevated loopback cho harness trong giao diện Codex theo RESULT #7072642067; comment GitHub chưa đủ mở quyền thực thi. Phase 2 NO_GO.
