@@ -305,7 +305,7 @@ def run_e2e() -> None:
 
         # Customer legacy B store contains an approved TEST_ONLY row; this must never be a public fallback.
         status, h, login = json_call(customer_origin + "/api/login", method="POST", obj={"password": CUSTOMER_PASSWORD}, headers={"Origin": customer_origin})
-        check(status == 200 and login.get("authenticated") is True, "customer_synthetic_login", evidence, f"HTTP {status}")
+        check(status == 200 and login.get("ok") is True, "customer_synthetic_login", evidence, f"HTTP {status}")
         customer_cookie = cookie_value(h.get("Set-Cookie", ""), "sala_owner_session")
         field_body = {"transaction_type": "SALE", "property_type": "TEST_ONLY legacy house", "title": "TEST_ONLY legacy approved row", "description": "Synthetic legacy-only record", "price_vnd": "1000000000", "area_m2": "50", "location": "TEST_ONLY legacy location", "source": "TEST_ONLY"}
         content_type, body = multipart(field_body, "legacy.png", PNG)
