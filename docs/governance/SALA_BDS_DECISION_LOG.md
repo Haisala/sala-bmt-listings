@@ -106,6 +106,16 @@ Nguồn đầy đủ: [MASTER 5 PHASE #7058182954](https://github.com/Haisala/sa
 - Quyết định này **chỉ gỡ blocker môi trường**; không cho phép merge, release, production/staging public hay chuyển Phase 2. `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`, `PR_MERGE_GO=NO`.
 - Khi có quyền thực và test, Codex phải lập RESULT gồm proof bind/socket/process SHA, test HTTP từng cạnh, dữ liệu synthetic và clean teardown; không dùng test in-process trước đó thay E2E.
 
+## D11 — Owner GO nhiều lượt không cần hỏi lại cho cùng isolated HTTP E2E — APPROVED 22/11/2026
+
+**Nguồn:** [Codex PARTIAL #7072568397](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072568397) → [Owner GO #7072619842](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072619842).
+
+- **Quyền điều phối:** Owner chấp thuận Codex tự lặp chu trình sửa lỗi harness/fixture/test hẹp và chạy lại **không giới hạn số lượt trong chính một nhiệm vụ** `ISOLATED_HTTP_E2E / ADMIN_APPROVED_PROJECTION_TO_CUSTOMER_WEB` trên PR #44, bắt đầu với harness đã sửa tại head `b798aa7374c7712ac90a1bcf23b9b3f50e1ba952`. Không cần Owner GO riêng cho mỗi lượt làm lại khi phạm vi không đổi.
+- **Phân biệt rõ quyền:** Không giới hạn **số lượt trong phạm vi test cô lập**, KHÔNG cấp quyền root, full disk/network, vô hiệu hóa sandbox, truy cập dữ liệu thật, deploy hay merge. Quyền bind loopback OS/Codex phải được **công cụ thực thi thực sự cấp**; GitHub comment không tự chuyển thành permission trong sandbox. Nếu cơ chế cho phép rule scoped liên tục, chỉ trong chính harness/loopback TEST_ONLY.
+- **Giới hạn thực thi:** hai cổng ephemeral mới trên 127.0.0.1, DB/artifact/media/password synthetic trong temp root 0700; không can thiệp `:8765/:18876/:18877`, Code A/B dirty worktrees, main, DNS, staging công khai, Pages/apex, Credential/Keychain, AI phí, B legacy DB, SALA Media hay dự án khác.
+- **Điều kiện kết quả:** báo HTTP request/response từng cạnh Admin Gate A → Owner Web publication → approved artifact → Customer Feed/Search/Detail/Media → stale/revoke; các negative cases phải đạt trên socket thật, không tráo thành in-process synthetic tests. Từ chối tự phong Phase 1 unified PASS hoặc mở Phase 2 chỉ vì isolated E2E PASS.
+- **Gate không đổi:** `PR44_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`. Một RESULT có SHA, matrix, isolation/cleanup và next action.
+
 ## Lưu ý về authority
 
 [Blueprint V1.0](../SALA_BDS_MASTER_SYSTEM_WEB_FIRST_BLUEPRINT_V1_OWNER_APPROVED.md) là **design target**; các quyết định Owner sau đó trong [Issue #39](https://github.com/Haisala/sala-bmt-listings/issues/39) và [Issue #38](https://github.com/Haisala/sala-bmt-listings/issues/38) bổ sung/thay thế trong **đúng phạm vi**. Không biến thiết kế cũ AI9 chín khối thành lệnh chạy chín API hoặc ép hoàn thành các phân hệ khác trước First Web. Phần lịch sử mô tả Issue trước chuẩn hóa được giữ nguyên tại [archive](./SALA_BDS_ISSUE39_PRE_3T_ARCHIVE.md).
