@@ -21,6 +21,10 @@ from email.parser import BytesParser
 from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+try:  # support both ``python sala_web.py`` and package imports in tests
+    from .projection_reader import ProjectionUnavailable, PublicProjectionReader
+except ImportError:
+    from projection_reader import ProjectionUnavailable, PublicProjectionReader
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT / "frontend"
@@ -439,8 +443,9 @@ class Store:
 
 
 class Application:
-    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None):
+    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None, public_projection_path: str | Path | None = None, public_assets_root: str | Path | None = None):
         self.store = Store(db_path)
+        self.public_read_model = PublicProjectionReader(public_projection_path, public_assets_root)
         if owner_password is not None and owner_password_file is not None:
             raise AuthError("Configure exactly one Owner password source")
         if owner_password_file is not None:
@@ -503,13 +508,22 @@ class Application:
                 return self._json_response(503, {"error": "Frontend asset missing"})
             return self._response(200, data, mime, {"Cache-Control": "no-cache"})
         if method == "GET" and path == "/api/listings":
-            return self._json_response(200, {"items": self.store.list_listings(query)})
+            try:
+                return self._json_response(200, {"items": self.public_read_model.list_listings(query)})
+            except ProjectionUnavailable as exc:
+                return self._json_response(503, {"error": str(exc)})
         if method == "GET" and path.startswith("/api/listings/"):
-            item = self.store.get_listing(path.rsplit("/", 1)[-1], public=True)
-            return self._json_response(200, item) if item else self._json_response(404, {"error": "Listing not found"})
+            try:
+                item = self.public_read_model.get_listing(path.rsplit("/", 1)[-1])
+                return self._json_response(200, item) if item else self._json_response(404, {"error": "Listing not found"})
+            except ProjectionUnavailable as exc:
+                return self._json_response(503, {"error": str(exc)})
         if method == "GET" and path.startswith("/media/"):
-            item = self.store.media(path.rsplit("/", 1)[-1], public=True)
-            return self._response(200, item[1], item[0]) if item else self._json_response(404, {"error": "Media not found"})
+            try:
+                item = self.public_read_model.media(path.rsplit("/", 1)[-1])
+                return self._response(200, item[1], item[0]) if item else self._json_response(404, {"error": "Media not found"})
+            except ProjectionUnavailable as exc:
+                return self._json_response(503, {"error": str(exc)})
         if method == "GET" and path == "/api/admin/pending":
             if not self._owner(headers):
                 return self._json_response(401, {"error": "Owner authentication required"})
@@ -592,7 +606,13 @@ def serve() -> None:
     owner_password_file = os.environ.get("SALA_OWNER_PASSWORD_FILE")
     if owner_password and owner_password_file:
         raise SystemExit("Configure exactly one Owner password source")
-    app = Application(os.environ.get("SALA_DB_PATH", str(ROOT / "var" / "customer_web.sqlite3")), owner_password, set(filter(None, os.environ.get("SALA_ALLOWED_ORIGINS", "https://haisala.io.vn").split(","))), owner_password_file=owner_password_file)
+    app = Application(
+        os.environ.get("SALA_DB_PATH", str(ROOT / "var" / "customer_web.sqlite3")), owner_password,
+        set(filter(None, os.environ.get("SALA_ALLOWED_ORIGINS", "https://haisala.io.vn").split(","))),
+        owner_password_file=owner_password_file,
+        public_projection_path=os.environ.get("SALA_PUBLIC_PROJECTION_PATH") or None,
+        public_assets_root=os.environ.get("SALA_PUBLIC_ASSETS_ROOT") or None,
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):

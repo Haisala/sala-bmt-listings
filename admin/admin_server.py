@@ -1328,6 +1328,10 @@ class Handler(BaseHTTPRequestHandler):
             if match:
                 with PROPERTY_OPERATION_LOCK:
                     result = center.approve(match.group(1), expected_revision=int(payload["expected_revision"]), owner_id=request_owner, decision=str(payload["decision"]), idempotency_key=str(payload["idempotency_key"]), target_property_id=payload.get("target_property_id"))
+                    # A Gate A mutation may advance canonical revision. Withdraw
+                    # any older website preview before the next public read can
+                    # mistake that stale artifact for the current revision.
+                    _public_release_snapshot(center, match.group(1), cleanup_stale_preview=True)
                 self.send_json(result); return True
             match = re.fullmatch(r"/api/reviews/([^/]+)/reject", path)
             if match:
