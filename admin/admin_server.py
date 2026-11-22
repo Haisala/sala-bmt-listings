@@ -762,6 +762,23 @@ def save_index(items: list[dict]) -> None:
         tmp.replace(INDEX_PATH)
 
 
+def remove_index_record(intake_id: str) -> None:
+    """Atomically remove one intake; the create/update merge path cannot delete."""
+    ensure_private()
+    with PRIVATE_FILE_LOCK:
+        try:
+            current = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current = []
+        if not isinstance(current, list):
+            current = []
+        filtered = [item for item in current if not isinstance(item, dict) or item.get("id") != intake_id]
+        tmp = INDEX_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(INDEX_PATH)
+
+
 def append_audit(operation: str, intake_id: str | None, outcome: str, code: str | None = None,
                  attempt: int = 0, retry_at: str | None = None, operation_id: str | None = None,
                  idempotency_key: str | None = None) -> None:
@@ -1871,7 +1888,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 403)
             return
         if record is not None:
-            save_index([x for x in items if x.get("id") != intake_id])
+            remove_index_record(intake_id)
         folder = INBOX_ROOT / intake_id
         if folder.exists():
             if folder.is_dir() and folder.parent == INBOX_ROOT:

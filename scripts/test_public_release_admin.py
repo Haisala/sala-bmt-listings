@@ -344,7 +344,32 @@ def main() -> None:
         os.environ.pop("BMT_ADMIN_STAGING_ROOT", None)
         os.environ.pop("BMT_ADMIN_PUBLIC_ASSETS_ROOT", None)
 
-        print("PUBLIC_RELEASE_ADMIN_PASS: Owner session + CSRF/origin, body spoof rejection, Gate A/review/Core revision binding, duplicate/replay, rights/conflict fail-closed, optional legal status, private Website preview, revision refresh, revoke, rollback, unchanged canonical count/revisions, Admin responsive controls")
+        # TEST_ONLY intake cleanup must remove the index row, not merge it back.
+        saved_env = {key: os.environ.get(key) for key in ("BMT_ENV", "BMT_ADMIN_PUBLIC_ORIGIN", "BMT_ADMIN_ALLOWED_IP")}
+        saved_secure_cookie, saved_allowlist = adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP
+        os.environ.update({"BMT_ENV": "staging", "BMT_ADMIN_PUBLIC_ORIGIN": "https://admin.test",
+                           "BMT_ADMIN_ALLOWED_IP": "127.0.0.1"})
+        adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP = True, "127.0.0.1"
+        cleanup_intake = fake_intake("intake-" + uuid.uuid4().hex[:24])
+        adm.ensure_private()
+        adm.save_index([cleanup_intake])
+        cleanup_folder = adm.INBOX_ROOT / cleanup_intake["id"]
+        cleanup_folder.mkdir(mode=0o700, parents=True)
+        (cleanup_folder / "metadata.json").write_text(json.dumps(cleanup_intake), encoding="utf-8")
+        cleanup_package = process_intake(store, center, cleanup_intake)
+        cleanup_review_id = cleanup_package["review_id"]
+        handler, cleanup_response = make_handler(adm, f"/api/intakes/{cleanup_intake['id']}",
+                                                 method="DELETE", origin="https://admin.test")
+        handler.headers["X-Test-Fixture"] = "TEST_ONLY"
+        handler.do_DELETE()
+        assert cleanup_response["status"] == 200 and not adm.load_index(), cleanup_response
+        assert not cleanup_folder.exists() and cleanup_review_id not in center.packages
+        for key, value in saved_env.items():
+            if value is None: os.environ.pop(key, None)
+            else: os.environ[key] = value
+        adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP = saved_secure_cookie, saved_allowlist
+
+        print("PUBLIC_RELEASE_ADMIN_PASS: Owner session + CSRF/origin, Gate A/review/Core revision binding, replay, rights fail-closed, private Website preview, revision refresh/revoke/rollback, unchanged canonical state, responsive Admin controls, TEST_ONLY cleanup removes intake index and private media/review")
 
 
 if __name__ == "__main__":
