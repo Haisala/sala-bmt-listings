@@ -93,8 +93,24 @@ def main():
                                                rights_status="APPROVED", provider=bad_provider, model="gpt-6-luna", usage_sink=bad_sink)
         assert bad["status"] == "BLOCKED" and bad["generation"]["request_id"] == "req_TEST_ONLY"
         assert len(bad_sink.rows) == 1 and bad_sink.rows[0]["outcome"] == "FAILED"
+        from property_memory.providers.openai_provider import ProviderError
+
+        class FailingProvider:
+            provider_name = "TEST_ONLY"
+
+            def generate(self, payload):
+                raise ProviderError("PROVIDER_4XX", "TEST_ONLY provider failure",
+                                    diagnostics={"http_status": 400, "error_code": "model_not_found"})
+
+        safe_failure = build_generative_internal_draft(
+            ai_run={"ai_run_id": "TEST_ONLY-fail", "facts_revision_id": "facts-test-r1"},
+            facts=package["candidate"]["facts"], provenance_status="PASS", rights_status="APPROVED",
+            provider=FailingProvider(), model="gpt-6-luna", usage_sink=FakeUsage())
+        assert safe_failure["reason_codes"] == ["CONTENT_PROVIDER_ERROR_PROVIDER_4XX"]
+        assert safe_failure["generation"]["provider_http_status"] == 400
+        assert safe_failure["generation"]["provider_error_code"] == "model_not_found"
         store.close()
-        print("PASS: TEST_ONLY Admin AI route, Gate A revision binding, exactly 3 variants, usage/request receipt, private-only state, Property Core unchanged")
+        print("PASS: TEST_ONLY Admin AI route, Gate A revision binding, exactly 3 variants, usage/request receipt, private-only state, Property Core unchanged, sanitized provider failure receipt")
 
 
 if __name__ == "__main__":

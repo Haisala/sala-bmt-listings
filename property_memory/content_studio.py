@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
+import re
 from typing import Any
 from .usage_ledger import official_pricing_catalog
 
@@ -132,7 +133,17 @@ def build_generative_internal_draft(*, ai_run: dict[str, Any], facts: dict[str, 
     try:
         response = provider.generate(payload)
     except Exception as exc:
-        return blocked("CONTENT_PROVIDER_ERROR_" + type(exc).__name__)
+        provider_code = getattr(exc, "code", None)
+        reason = provider_code if isinstance(provider_code, str) and re.fullmatch(r"[A-Z0-9_]{1,64}", provider_code) else type(exc).__name__
+        diagnostics = getattr(exc, "diagnostics", {})
+        if isinstance(diagnostics, dict):
+            status = diagnostics.get("http_status")
+            if isinstance(status, int) and 100 <= status <= 599:
+                generation["provider_http_status"] = status
+            error_code = diagnostics.get("error_code")
+            if isinstance(error_code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", error_code):
+                generation["provider_error_code"] = error_code
+        return blocked("CONTENT_PROVIDER_ERROR_" + reason)
     usage = response.get("usage") if isinstance(response, dict) and isinstance(response.get("usage"), dict) else None
     request_id = response.get("provider_request_id") if isinstance(response, dict) and isinstance(response.get("provider_request_id"), str) else None
     variants = response.get("variants") if isinstance(response, dict) else None
