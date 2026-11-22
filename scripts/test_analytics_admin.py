@@ -37,7 +37,8 @@ def main() -> None:
         adm._ANALYTICS_STORE = None
         adm._ANALYTICS_RATE_TIMES.clear()
         property_id = os.environ.get("BMT_TEST_PROPERTY_ID", "property-0123456789abcdef")
-        adm._analytics_property_is_public = lambda value: value == property_id
+        publication_id = "publication-0123456789abcdef0123456789abcdef"
+        adm._analytics_property_is_public = lambda value, publication: value == property_id and publication == publication_id
 
         def call(method: str, path: str, payload=None, *, origin="http://127.0.0.1:43130", owner="owner-test-only", extra_headers=None):
             response = {"headers": {}}
@@ -67,8 +68,8 @@ def main() -> None:
 
         payloads = [
             {"event_id": str(uuid.uuid4()), "event_type": "page_view", "page_type": "home"},
-            {"event_id": str(uuid.uuid4()), "event_type": "property_detail_view", "property_id": property_id},
-            {"event_id": str(uuid.uuid4()), "event_type": "contact_cta_click", "property_id": property_id, "channel": "zalo"},
+            {"event_id": str(uuid.uuid4()), "event_type": "property_detail_view", "property_id": property_id, "publication_id": publication_id},
+            {"event_id": str(uuid.uuid4()), "event_type": "contact_cta_click", "property_id": property_id, "publication_id": publication_id, "channel": "zalo"},
         ]
         for payload in payloads:
             accepted = call("POST", "/api/analytics/events", payload)
@@ -82,6 +83,8 @@ def main() -> None:
         assert denied_origin["status"] == 403 and "Access-Control-Allow-Origin" not in denied_origin["headers"]
         unknown = call("POST", "/api/analytics/events", {**payload, "event_id": str(uuid.uuid4()), "property_id": "property-deadbeef"})
         assert unknown["status"] == 422
+        stale_publication = call("POST", "/api/analytics/events", {**payload, "event_id": str(uuid.uuid4()), "publication_id": "publication-deadbeef0123456789abcdef01234567"})
+        assert stale_publication["status"] == 422
         oversized = call("POST", "/api/analytics/events", payload, extra_headers={"Content-Length": "4097"})
         assert oversized["status"] == 413
         invalid_event = call("POST", "/api/analytics/events", {**payload, "event_id": str(uuid.uuid4()), "phone": "0901234567"})
@@ -104,9 +107,9 @@ def main() -> None:
         report = call("GET", f"/api/analytics/report?from={report_date}&to={report_date}")
         assert report["status"] == 200 and report["value"]["total_events"] == 3
         assert report["value"]["by_property"] == [
-            {"property_id": None, "event_type": "page_view", "count": 1},
-            {"property_id": property_id, "event_type": "contact_cta_click", "count": 1},
-            {"property_id": property_id, "event_type": "property_detail_view", "count": 1},
+            {"property_id": None, "publication_id": None, "event_type": "page_view", "count": 1},
+            {"property_id": property_id, "publication_id": publication_id, "event_type": "contact_cta_click", "count": 1},
+            {"property_id": property_id, "publication_id": publication_id, "event_type": "property_detail_view", "count": 1},
         ]
         assert report["value"]["privacy"]["phone_lead_inferred"] is False
 

@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .public_contract_adapter import STATUSES as PUBLIC_STATUSES
+from .review_center import public_release_id
 from .store import PropertyStore, is_publishable_by_rights
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_FIELDS = frozenset({
-    "id", "propertyId", "propertyRevision", "projectionId", "projectionGeneratedAt",
+    "id", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt",
     "slug", "title", "category", "propertyType", "addressText", "status", "price",
     "priceLabel", "priceNote", "area", "dimensions", "width", "length", "landArea",
     "legal", "road", "features", "description", "images", "videos", "reelUrl",
@@ -162,7 +163,8 @@ def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any]) ->
     media = _public_media(store, prop["property_id"], public_slug)
     dto = {
         "id": public_slug, "propertyId": prop["property_id"], "propertyRevision": revision,
-        "projectionId": projection_id, "projectionGeneratedAt": generated_at,
+        "projectionId": projection_id, "publicationId": release.get("publication_id") or public_release_id(release),
+        "projectionGeneratedAt": generated_at,
         "sourceSystem": "SALA_PROPERTY_CORE", "publicationStatus": "APPROVED",
         "publicationRevision": revision, "publicationApprovedAt": release.get("at"),
         "mediaRights": {ref: "APPROVED_PUBLIC" for ref in media},

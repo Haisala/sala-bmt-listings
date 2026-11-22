@@ -1,35 +1,33 @@
-# Customer Web host preparation (P1.1)
+# Customer Web host preparation (Issue #39)
 
-This is an isolated macOS launchd template. It is deliberately **not installed or loaded**. It binds only `127.0.0.1:18877`, uses a private SQLite path outside the static frontend, and scrubs inherited process environment with `env -i`. It points to the existing SALA BĐS Owner password source at `/Users/trandinhhieu/BMTPropertyHubPrivate/admin-password`; the file itself is neither copied nor printed. The app validates its owner-only permissions and stores only a salted PBKDF2 verifier in its own private SQLite database. A service restart reloads the current source value.
+This candidate is source/build preparation only. The launchd example is not installed or loaded, and no process, tunnel, DNS, Pages setting, or production service was changed. The Customer service entrypoint is projection-only: it does not initialize the legacy Customer SQLite store, provision Customer Owner credentials, or expose Customer Owner/intake/review routes. SALA Admin remains the Owner authority; Customer reads the configured approved projection and returns 503 when that source is absent or invalid.
 
-## Candidate host facts
+## Runtime configuration still required
 
-- Mac has Python 3.13 and `cloudflared` installed; port 18877 was free at preflight. This is a candidate, not proof of long-term uptime or a deployed service.
-- `launchd` has no Customer Web job loaded. Existing Admin and other service labels/configurations were not changed.
-- Existing source metadata was inspected without reading the file: Owner-owned regular file, mode `0600`, parent directory mode `0700`. The Customer Web service uses this explicit path only; it does not inherit the ambiguous global launchd variable.
-- No tunnel, DNS, Pages setting, secret, database or customer data is created by these files.
+The example plist binds loopback and scrubs inherited environment, but intentionally omits unverified paths. Before any separately authorized staging start, the release operator must configure and verify:
 
-## Stage-only setup outline
+- `SALA_PUBLIC_PROJECTION_PATH`: the exact Admin-approved projection artifact path.
+- `SALA_PUBLIC_ASSETS_ROOT`: the matching approved public media root.
+- `SALA_ADMIN_ANALYTICS_URL`: the trusted Admin analytics endpoint; absent configuration causes event relay to fail closed with 503.
+- The exact Customer origin must be permitted by Admin analytics origin policy; property events are bound to active `property_id + publication_id`.
 
-1. Install a reviewed release into `~/Library/Application Support/SALA Customer Web/current` (do not run from the dirty repository worktree).
-2. Prepare isolated private folders:
+No Owner password or Customer database path belongs in the public service configuration. The current plist example is not a ready-to-start or public deployment artifact because the exact projection/media/analytics paths and ingress are not configured.
 
-   ```sh
-   python3 deploy/runtime_dirs.py "$HOME/Library/Application Support/SALA Customer Web"
-   ```
+## Allowlisted release bundle
 
-3. Place the plist at `~/Library/LaunchAgents/com.haisala.customer-web.plist` only after the release and private runtime/log directories are verified. The plist contains only the path to the pre-existing Owner source, not its contents. `RunAtLoad` is false; bootstrap only after isolated host checks. Do not copy or print the Owner password.
-4. Use a separate Customer Web ingress/tunnel only after local HTTP, restart, backup/restore and authentication checks pass. Do not reuse Admin staging or any other system tunnel. Keep apex/www on the maintenance page until the new host passes its gate.
-
-## SQLite backup and restore
-
-Use the standard-library SQLite online backup API so WAL data is included consistently. Backups/restores are non-overwriting by default, integrity/schema checked, atomically written, and restricted to mode `0600` inside an owner-only directory. Example paths must be private and outside static assets:
+`build_release_bundle.py` packages only `release-allowlist.txt` runtime files, emits a deterministic SHA-256 manifest, and never deploys or changes GitHub Pages. Build output must be in a private directory outside the source checkout:
 
 ```sh
-python3 deploy/storage_tools.py backup /private/path/customer.sqlite3 /private/path/backups/customer.sqlite3
-python3 deploy/storage_tools.py restore /private/path/backups/customer.sqlite3 /private/path/restore/customer.sqlite3
+umask 077
+python3 deploy/build_release_bundle.py /private/path/private-release-dir --source-revision <reviewed-git-sha>
 ```
 
-Tests use only temporary synthetic TEST_ONLY rows and never reference the production domain or live store.
+The bundle is a service bundle, not proof of a configured Customer host or Pages artifact. No workflow was changed; the repository's competing historical Pages configuration remains a release blocker pending authoritative workflow/artifact verification.
 
-The legacy password source is loaded only when the process starts and hashed in the Customer Web database. Password-source changes take effect after a controlled Customer Web restart; existing sessions remain valid until normal expiry or logout. No Admin password, account, service, or staging configuration is changed.
+## TEST_ONLY snapshot utility
+
+`snapshot_bundle.py` offers `create_snapshot` and `restore_snapshot` for explicitly selected private SQLite and media paths. It takes a consistent SQLite online backup, records table counts/schema and file hashes, encrypts using OpenSSL AES-256-CBC/PBKDF2, and authenticates the archive with HMAC before restore. It never chooses real paths or stores the passphrase. Tests use only temporary TEST_ONLY data and a synthetic image, verifying tamper/wrong-key rejection, private permissions and non-overwrite behavior. No real-data inventory, backup, cleanup, or restore was performed.
+
+## Release gates
+
+The isolated HTTP harness proves Admin projection → Customer public reads, analytics receipts, revocation behavior and disabled duplicate Customer Owner APIs on temporary TEST_ONLY roots. It does not prove the current launchd service, HTTPS/browser/iPhone behavior, staging/production routing, live Content API availability, or Owner acceptance. Do not install, start, route, merge, or deploy from this candidate without the exact source/artifact and operation gate required by Issue #39.

@@ -10,23 +10,12 @@
   <script defer src="/app.js"></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/" aria-label="SALA BĐS trang chủ"><span class="brand-mark">S</span><span>SALA <b>BĐS</b><small>BUÔN MA THUỘT</small></span></a><button id="owner-open" class="quiet" type="button">Owner</button></header>
+  <header class="topbar"><a class="brand" href="/" aria-label="SALA BĐS trang chủ"><span class="brand-mark">S</span><span>SALA <b>BĐS</b><small>BUÔN MA THUỘT</small></span></a></header>
   <main>
     <section class="hero"><p class="eyebrow">BẤT ĐỘNG SẢN BUÔN MA THUỘT</p><h1>Tìm nơi phù hợp<br><em>để gọi là nhà.</em></h1><p class="hero-copy">Thông tin rõ ràng, chỉ hiển thị tin đã được kiểm duyệt.</p><div class="searchbar"><label class="sr-only" for="search">Tìm kiếm</label><input id="search" type="search" placeholder="Khu vực, loại nhà, từ khóa…"><button id="search-button" type="button">Tìm kiếm</button></div><div class="filters"><select id="transaction"><option value="">Mua bán & cho thuê</option><option value="SALE">Mua bán</option><option value="RENT">Cho thuê</option></select><select id="sort"><option value="new">Mới cập nhật</option><option value="price-up">Giá thấp đến cao</option><option value="price-down">Giá cao đến thấp</option></select></div></section>
     <section class="feed-section"><div class="section-heading"><div><p class="eyebrow">DANH SÁCH</p><h2>Bất động sản đã duyệt</h2></div><span id="result-count" class="count">0 tin</span></div><p id="notice" class="notice" role="status">Đang tải dữ liệu…</p><div id="feed" class="feed" aria-live="polite"></div></section>
     <section id="detail" class="detail hidden" aria-live="polite"></section>
-    <section id="owner-panel" class="owner-panel hidden">
-      <div class="section-heading"><div><p class="eyebrow">KHU VỰC RIÊNG</p><h2>Quản lý tin</h2></div><button id="logout" class="quiet hidden" type="button">Đăng xuất</button></div>
-      <form id="login-form" class="panel-form"><label>Mật khẩu Owner<input name="password" type="password" autocomplete="current-password" minlength="16" required></label><button type="submit">Đăng nhập</button><p class="form-error" id="login-error" role="alert"></p></form>
-      <div id="owner-tools" class="hidden">
-        <form id="intake-form" class="panel-form" enctype="multipart/form-data">
-          <h3>Nhập bất động sản</h3>
-          <div class="form-grid"><label>Loại giao dịch<select name="transaction_type" required><option value="SALE">Mua bán</option><option value="RENT">Cho thuê</option></select></label><label>Loại bất động sản<input name="property_type" required maxlength="80" placeholder="Căn hộ, nhà, đất…"></label><label class="wide">Tiêu đề<input name="title" required maxlength="160"></label><label>Giá (VND)<input name="price_vnd" type="number" min="1" required></label><label>Diện tích (m²)<input name="area_m2" type="number" min="0.1" step="0.1" required></label><label class="wide">Vị trí<input name="location" required maxlength="300"></label><label class="wide">Mô tả<textarea name="description" required maxlength="4000" rows="4"></textarea></label><label>Nguồn<input name="source" required maxlength="120" value="Owner entry"></label><label>Ảnh JPEG/PNG/WebP<input name="media" type="file" accept="image/jpeg,image/png,image/webp" multiple></label></div>
-          <div class="form-actions"><button id="intake-submit" type="submit">Gửi vào hàng chờ</button><button id="clear-edit" class="quiet hidden" type="button">Hủy sửa</button></div><p id="intake-message" class="form-error" role="status"></p>
-        </form>
-        <div class="pending-wrap"><h3>Chờ Owner duyệt</h3><div id="pending" class="pending-list"></div></div>
-      </div>
-    </section>
+
   </main>
   <footer><a class="brand" href="/" aria-label="SALA BĐS trang chủ"><span class="brand-mark">S</span><span>SALA <b>BĐS</b><small>BUÔN MA THUỘT</small></span></a><p>Thông tin chỉ được công khai sau khi Owner duyệt.</p><small>© SALA BĐS</small></footer>
 </body>

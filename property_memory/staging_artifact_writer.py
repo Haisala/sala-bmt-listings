@@ -36,7 +36,7 @@ def write_staging_web_artifact(
     _guard(destination)
     record = to_legacy_web_record(dto)
     # Preserve lineage for staging audits; Customer Web ignores these fields.
-    for key in ("propertyId", "propertyRevision", "projectionId", "projectionGeneratedAt"):
+    for key in ("propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt"):
         record[key] = dto[key]
 
     existing: list[Any] = []

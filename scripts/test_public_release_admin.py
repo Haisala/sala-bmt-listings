@@ -161,6 +161,10 @@ def main() -> None:
         assert response["value"]["published"] is False and response["value"]["decision_owner"] == "owner-primary"
         first_web = json.loads(website_path.read_text(encoding="utf-8"))
         first_core_projection = json.loads(canonical_path.read_text(encoding="utf-8"))
+        publication_id = response["value"]["publication_id"]
+        assert first_web[0]["publicationId"] == publication_id
+        assert adm._analytics_property_is_public(property_id, publication_id)
+        assert not adm._analytics_property_is_public(property_id, "publication-00000000000000000000000000000000")
         assert len(first_web) == len(first_core_projection) == 1
         assert first_web[0]["propertyId"] == first_core_projection[0]["propertyId"] == property_id
         assert first_web[0]["propertyRevision"] == 1 and first_web[0]["price"] == 1850000000
@@ -245,6 +249,7 @@ def main() -> None:
                                          payload=revoke_payload, origin=origin)
         handler.do_POST()
         assert response["status"] == 200 and response["value"]["status"] == "REVOKED"
+        assert not adm._analytics_property_is_public(property_id, publication_id)
         assert response["value"]["preview_removed"] == 0
         assert store.get(property_id)["property_revision"] == 2 and len(store.list_properties()) == property_count
 

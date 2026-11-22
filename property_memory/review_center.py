@@ -33,6 +33,13 @@ def _marker_set(package: dict[str, Any]) -> set[str]:
 def _has_value(value: Any) -> bool:
     return value is not None and value != ""
 
+def public_release_id(decision: dict[str, Any]) -> str:
+    """Stable opaque ID for one explicit publication decision/replay."""
+    seed = "|".join(str(decision.get(key) or "") for key in (
+        "property_id", "property_revision", "review_id", "idempotency_key",
+    ))
+    return "publication-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
 _GATE_MARKERS = {
     "title": {"title", "name"},
     "address": {"address", "location", "relative_location"},
@@ -294,6 +301,10 @@ class ReviewCenter:
                 "review_revision": expected_revision, "idempotency_key": idempotency_key,
                 "at": now,
             })
+            if action == "APPROVE_PUBLICATION":
+                decisions[-1]["publication_id"] = public_release_id(decisions[-1])
+            elif latest:
+                decisions[-1]["publication_id"] = latest.get("publication_id") or public_release_id(latest)
             if reason:
                 decisions[-1]["reason"] = str(reason).strip()[:240]
             package["updated_at"] = now

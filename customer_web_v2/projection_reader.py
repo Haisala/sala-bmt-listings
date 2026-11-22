@@ -130,6 +130,7 @@ class PublicProjectionReader:
         return {
             "listing_id": dto["id"], "property_id": dto["propertyId"],
             "property_revision": int(dto["propertyRevision"]), "projection_id": dto["projectionId"],
+            "publication_id": dto["publicationId"],
             "publication_revision": int(dto["publicationRevision"]),
             "publication_approved_at": dto["publicationApprovedAt"],
             "status": "APPROVED", "transaction_type": "RENT" if transaction == "RENTAL" else "SALE",

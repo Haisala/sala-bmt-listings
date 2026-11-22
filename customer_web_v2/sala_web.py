@@ -22,8 +22,10 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 try:  # support both ``python sala_web.py`` and package imports in tests
+    from .analytics_relay import AnalyticsRelay, AnalyticsRelayError
     from .projection_reader import ProjectionUnavailable, PublicProjectionReader
 except ImportError:
+    from analytics_relay import AnalyticsRelay, AnalyticsRelayError
     from projection_reader import ProjectionUnavailable, PublicProjectionReader
 
 ROOT = Path(__file__).resolve().parent
@@ -443,12 +445,18 @@ class Store:
 
 
 class Application:
-    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None, public_projection_path: str | Path | None = None, public_assets_root: str | Path | None = None):
-        self.store = Store(db_path)
+    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None, public_projection_path: str | Path | None = None, public_assets_root: str | Path | None = None, analytics_relay_url: str | None = None, test_mode: bool = False, legacy_owner_enabled: bool = True):
+        self.legacy_owner_enabled = legacy_owner_enabled
+        self.store = Store(db_path) if legacy_owner_enabled else None
         self.public_read_model = PublicProjectionReader(public_projection_path, public_assets_root)
+        self.analytics_relay = AnalyticsRelay(analytics_relay_url, test_mode=test_mode)
+        if not legacy_owner_enabled and (owner_password is not None or owner_password_file is not None):
+            raise AuthError("Public Customer Web cannot configure a legacy Owner credential")
         if owner_password is not None and owner_password_file is not None:
             raise AuthError("Configure exactly one Owner password source")
-        if owner_password_file is not None:
+        if not legacy_owner_enabled:
+            self.owner_configured = False
+        elif owner_password_file is not None:
             existing_password = read_owner_password_file(owner_password_file)
             self.owner_configured = self.store.provision_owner(existing_password, allow_existing_short=True, refresh=True)
         else:
@@ -486,7 +494,7 @@ class Application:
         return self._response(status, _json(data), extra=extra)
 
     def _owner(self, headers: dict[str, str]) -> bool:
-        return self.store.valid_session(self._cookie(headers))
+        return bool(self.legacy_owner_enabled and self.store and self.store.valid_session(self._cookie(headers)))
 
     def handle(self, method: str, target: str, headers: dict[str, str] | None = None, body: bytes = b"", client_ip: str = "unknown") -> Response:
         headers = {k.lower(): v for k, v in (headers or {}).items()}
@@ -499,7 +507,7 @@ class Application:
         if len(body) > MAX_REQUEST:
             return self._json_response(413, {"error": "Request too large"})
         if method == "GET" and path == "/health":
-            return self._json_response(200, {"ok": True, "storage": "sqlite"})
+            return self._json_response(200, {"ok": True, "storage": "admin_projection" if not self.legacy_owner_enabled else "sqlite"})
         if method == "GET" and path in ASSET_MAP:
             name, mime = ASSET_MAP[path]
             try:
@@ -525,10 +533,14 @@ class Application:
             except ProjectionUnavailable as exc:
                 return self._json_response(503, {"error": str(exc)})
         if method == "GET" and path == "/api/admin/pending":
+            if not self.legacy_owner_enabled:
+                return self._json_response(404, {"error": "Not found"})
             if not self._owner(headers):
                 return self._json_response(401, {"error": "Owner authentication required"})
             return self._json_response(200, {"items": self.store.list_listings({}, public=False)})
         if method == "GET" and path == "/api/admin/listings":
+            if not self.legacy_owner_enabled:
+                return self._json_response(404, {"error": "Not found"})
             if not self._owner(headers):
                 return self._json_response(401, {"error": "Owner authentication required"})
             return self._json_response(200, {"items": self.store.list_all()})
@@ -536,7 +548,26 @@ class Application:
             return self._json_response(404, {"error": "Not found"})
         if headers.get("origin") not in self.allowed_origins:
             return self._json_response(403, {"error": "Origin rejected"})
+        if method == "POST" and path == "/api/analytics/events":
+            if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+                return self._json_response(415, {"error": "Analytics JSON required"})
+            if not body or len(body) > 4096:
+                return self._json_response(413 if body else 400, {"error": "Analytics request size invalid"})
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON object required")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                return self._json_response(400, {"error": "Analytics JSON invalid"})
+            try:
+                receipt = self.analytics_relay.send(payload, headers["origin"])
+                return self._json_response(200 if receipt["duplicate"] else 202, receipt)
+            except AnalyticsRelayError as exc:
+                status = exc.status if 400 <= exc.status < 500 else 503
+                return self._json_response(status, {"error": "Analytics rejected" if status < 500 else "Analytics unavailable"})
         if method == "POST" and path == "/api/login":
+            if not self.legacy_owner_enabled:
+                return self._json_response(404, {"error": "Not found"})
             now = time.monotonic()
             with self.login_lock:
                 attempts = [at for at in self.login_attempts.get(client_ip, []) if now - at < 900]
@@ -557,6 +588,8 @@ class Application:
             cookie = f"{COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800"
             return self._json_response(200, {"ok": True}, {"Set-Cookie": cookie})
         if not self._owner(headers):
+            if not self.legacy_owner_enabled:
+                return self._json_response(404, {"error": "Not found"})
             return self._json_response(401, {"error": "Owner authentication required"})
         if method == "POST" and path == "/api/logout":
             self.store.revoke(self._cookie(headers))
@@ -612,6 +645,9 @@ def serve() -> None:
         owner_password_file=owner_password_file,
         public_projection_path=os.environ.get("SALA_PUBLIC_PROJECTION_PATH") or None,
         public_assets_root=os.environ.get("SALA_PUBLIC_ASSETS_ROOT") or None,
+        analytics_relay_url=os.environ.get("SALA_ADMIN_ANALYTICS_URL") or None,
+        test_mode=os.environ.get("SALA_ENV") == "test",
+        legacy_owner_enabled=False,
     )
 
     class Handler(BaseHTTPRequestHandler):

@@ -56,7 +56,7 @@ def main() -> None:
         assert dto["propertyId"] == property_id and dto["propertyRevision"] == 1
         assert dto["projectionId"] and dto["projectionGeneratedAt"] and dto["images"] == []
         assert "candidate" not in dto and "owner_contact" not in dto and "internal_analysis" not in dto
-        assert set(dto).issubset({"id", "propertyId", "propertyRevision", "projectionId", "projectionGeneratedAt", "slug", "title", "category", "propertyType", "addressText", "status", "price", "priceLabel", "priceNote", "area", "dimensions", "width", "length", "landArea", "legal", "road", "features", "description", "images", "videos", "reelUrl", "createdAt", "updatedAt", "areas", "locationNotes", "featured", "goodPrice", "transactionType", "priceUnit", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"})
+        assert set(dto).issubset({"id", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "slug", "title", "category", "propertyType", "addressText", "status", "price", "priceLabel", "priceNote", "area", "dimensions", "width", "length", "landArea", "legal", "road", "features", "description", "images", "videos", "reelUrl", "createdAt", "updatedAt", "areas", "locationNotes", "featured", "goodPrice", "transactionType", "priceUnit", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"})
 
         # Rights do not make internal inbox paths public locators.
         appearance = store.list_source_appearances(property_id)[0]
@@ -89,7 +89,9 @@ def main() -> None:
 
         # Replay is deterministic and does not append a duplicate.
         replay = build_public_projection(store, property_id, output)
-        assert replay["idempotent_replay"] is True
+        assert replay["replaced"] is True and replay["idempotent_replay"] is False
+        replay_again = build_public_projection(store, property_id, output)
+        assert replay_again["idempotent_replay"] is True
         assert len(json.loads(output.read_text(encoding="utf-8"))) == 1
 
         # New canonical revision gets a new lineage and preserves the same record slot.

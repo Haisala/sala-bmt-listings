@@ -1,0 +1,8 @@
+customer_web_v2/analytics_relay.py
+customer_web_v2/frontend/app.js
+customer_web_v2/frontend/index.html
+customer_web_v2/frontend/robots.txt
+customer_web_v2/frontend/styles.css
+customer_web_v2/projection_reader.py
+customer_web_v2/public_contract.py
+customer_web_v2/sala_web.py

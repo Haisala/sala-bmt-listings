@@ -68,6 +68,19 @@ class CustomerWebTests(unittest.TestCase):
             headers["Cookie"] = f"sala_owner_session={cookie}"
         return self.app.handle("POST", "/api/intakes", headers, body)
 
+    def test_public_build_has_no_customer_owner_or_property_store(self):
+        path = Path(self.temp.name) / "public-only" / "must-not-exist.sqlite3"
+        app = Application(path, allowed_origins={ORIGIN}, legacy_owner_enabled=False)
+        self.assertIsNone(app.store)
+        self.assertFalse(path.exists())
+        self.assertEqual(json.loads(app.handle("GET", "/health").body)["storage"], "admin_projection")
+        self.assertEqual(app.handle("POST", "/api/login", {"Origin": ORIGIN}, b"{}" ).status, 404)
+        self.assertEqual(app.handle("GET", "/api/admin/listings").status, 404)
+        self.assertEqual(app.handle("POST", "/api/intakes", {"Origin": ORIGIN}, b"" ).status, 404)
+        self.assertFalse(path.exists())
+        with self.assertRaisesRegex(AuthError, "cannot configure a legacy Owner credential"):
+            Application(path, PASSWORD, {ORIGIN}, legacy_owner_enabled=False)
+
     def test_boot_health_assets_and_secure_headers(self):
         health = self.app.handle("GET", "/health")
         self.assertEqual(health.status, 200)

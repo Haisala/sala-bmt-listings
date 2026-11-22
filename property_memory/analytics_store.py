@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 EVENT_TYPES = frozenset({"page_view", "property_card_view", "property_detail_view", "search_filter", "contact_cta_click"})
-PAYLOAD_KEYS = frozenset({"event_id", "event_type", "property_id", "page_type", "channel", "filter_type", "filter_value", "referrer_host", "utm_source", "utm_medium", "utm_campaign"})
+PAYLOAD_KEYS = frozenset({"event_id", "event_type", "property_id", "publication_id", "page_type", "channel", "filter_type", "filter_value", "referrer_host", "utm_source", "utm_medium", "utm_campaign"})
 FILTER_VALUES = {
     "transaction": frozenset({"sale", "rent"}),
     "property_type": frozenset({"apartment", "house", "land"}),
@@ -60,6 +60,11 @@ def normalize_event(payload: Any) -> dict[str, Any]:
     property_id = payload.get("property_id")
     if property_id is not None and (not isinstance(property_id, str) or not re.fullmatch(r"property-[a-f0-9]{8,64}", property_id)):
         raise AnalyticsValidationError("ANALYTICS_PROPERTY_ID_INVALID")
+    publication_id = payload.get("publication_id")
+    if publication_id is not None and (not isinstance(publication_id, str) or not re.fullmatch(r"publication-[a-f0-9]{32}", publication_id)):
+        raise AnalyticsValidationError("ANALYTICS_PUBLICATION_ID_INVALID")
+    if (property_id is None) != (publication_id is None):
+        raise AnalyticsValidationError("ANALYTICS_PUBLICATION_LINEAGE_REQUIRED")
 
     page_type = payload.get("page_type")
     channel = payload.get("channel")
@@ -68,8 +73,12 @@ def normalize_event(payload: Any) -> dict[str, Any]:
     if event_type == "page_view":
         if not isinstance(page_type, str) or page_type not in {"home", "listing_detail", "other"}:
             raise AnalyticsValidationError("ANALYTICS_PAGE_TYPE_INVALID")
+        if page_type == "listing_detail" and property_id is None:
+            raise AnalyticsValidationError("ANALYTICS_PUBLICATION_LINEAGE_REQUIRED")
     elif page_type is not None:
         raise AnalyticsValidationError("ANALYTICS_FIELD_NOT_APPLICABLE")
+    if event_type in {"property_card_view", "property_detail_view", "contact_cta_click"} and property_id is None:
+        raise AnalyticsValidationError("ANALYTICS_PUBLICATION_LINEAGE_REQUIRED")
     if event_type == "contact_cta_click":
         if not isinstance(channel, str) or channel not in CHANNELS:
             raise AnalyticsValidationError("ANALYTICS_CHANNEL_INVALID")
@@ -101,6 +110,7 @@ def normalize_event(payload: Any) -> dict[str, Any]:
 
     return {
         "event_id": event_id, "event_type": event_type, "property_id": property_id,
+        "publication_id": publication_id,
         "page_type": page_type, "channel": channel, "filter_type": filter_type,
         "filter_value": filter_value, "referrer_host": referrer_host,
         "utm_source": utm_source, "utm_medium": utm_medium, "utm_campaign": utm_campaign,
@@ -128,6 +138,7 @@ class AnalyticsStore:
             event_type TEXT NOT NULL,
             created_at TEXT NOT NULL,
             property_id TEXT,
+            publication_id TEXT,
             page_type TEXT,
             channel TEXT,
             filter_type TEXT,
@@ -137,6 +148,9 @@ class AnalyticsStore:
             utm_medium TEXT,
             utm_campaign TEXT
         )""")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(analytics_events)")}
+        if "publication_id" not in columns:
+            conn.execute("ALTER TABLE analytics_events ADD COLUMN publication_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_analytics_date_property ON analytics_events(created_at, property_id)")
         if self.path.exists():
             self.path.chmod(0o600)
@@ -147,13 +161,14 @@ class AnalyticsStore:
         cursor = conn.execute("DELETE FROM analytics_events WHERE created_at < ?", (cutoff,))
         return cursor.rowcount
 
-    def ingest(self, payload: Any, *, property_is_public: Callable[[str], bool] | None = None) -> dict[str, Any]:
+    def ingest(self, payload: Any, *, property_is_public: Callable[[str, str], bool] | None = None) -> dict[str, Any]:
         normalized = normalize_event(payload)
         encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > self.max_bytes:
             raise AnalyticsValidationError("ANALYTICS_PAYLOAD_TOO_LARGE")
         property_id = normalized["property_id"]
-        if property_id and (property_is_public is None or not property_is_public(property_id)):
+        publication_id = normalized["publication_id"]
+        if property_id and (property_is_public is None or not property_is_public(property_id, publication_id)):
             raise AnalyticsValidationError("ANALYTICS_PROPERTY_NOT_PUBLIC")
         event_hash = hashlib.sha256(encoded).hexdigest()
         now = _now()
@@ -169,10 +184,10 @@ class AnalyticsStore:
                     conn.commit()
                     return {"accepted": True, "duplicate": True}
                 conn.execute("""INSERT INTO analytics_events
-                    (event_id,event_hash,event_type,created_at,property_id,page_type,channel,filter_type,filter_value,referrer_host,utm_source,utm_medium,utm_campaign)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (event_id,event_hash,event_type,created_at,property_id,publication_id,page_type,channel,filter_type,filter_value,referrer_host,utm_source,utm_medium,utm_campaign)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (normalized["event_id"], event_hash, normalized["event_type"], _iso(now), property_id,
-                     normalized["page_type"], normalized["channel"], normalized["filter_type"], normalized["filter_value"],
+                     publication_id, normalized["page_type"], normalized["channel"], normalized["filter_type"], normalized["filter_value"],
                      normalized["referrer_host"], normalized["utm_source"], normalized["utm_medium"], normalized["utm_campaign"]))
                 conn.commit()
                 self.path.chmod(0o600)
@@ -213,7 +228,7 @@ class AnalyticsStore:
                     "filters": {"property_id": property_id, "event_type": event_type, "channel": channel},
                     "total_events": total,
                     "by_day": grouped(f"SELECT substr(created_at,1,10) AS date, COUNT(*) AS count FROM analytics_events WHERE {where} GROUP BY date ORDER BY date"),
-                    "by_property": grouped(f"SELECT property_id, event_type, COUNT(*) AS count FROM analytics_events WHERE {where} GROUP BY property_id,event_type ORDER BY property_id,event_type"),
+                    "by_property": grouped(f"SELECT property_id, publication_id, event_type, COUNT(*) AS count FROM analytics_events WHERE {where} GROUP BY property_id,publication_id,event_type ORDER BY property_id,publication_id,event_type"),
                     "by_event_type": grouped(f"SELECT event_type, COUNT(*) AS count FROM analytics_events WHERE {where} GROUP BY event_type ORDER BY event_type"),
                     "by_channel": grouped(f"SELECT channel, COUNT(*) AS count FROM analytics_events WHERE {where} AND channel IS NOT NULL GROUP BY channel ORDER BY channel"),
                     "by_source": grouped(f"SELECT COALESCE(utm_source,referrer_host,'direct') AS source, COUNT(*) AS count FROM analytics_events WHERE {where} GROUP BY source ORDER BY source"),

@@ -36,7 +36,7 @@ from urllib.parse import parse_qs, urlparse
 from property_memory.intake_review import process_intake
 from property_memory.providers.openai_provider import OpenAIPropertyProvider
 from property_memory.ai_gateway import AIGateway
-from property_memory.review_center import ReviewCenter
+from property_memory.review_center import ReviewCenter, public_release_id
 from property_memory.projection_builder import ProjectionError, _is_public_asset_ref, _media_rights_allowed, _slug, build_public_projection
 from property_memory.staging_artifact_writer import StagingArtifactError, withdraw_staging_web_record, write_staging_web_artifact
 from property_memory.ai9_layers import OWNER_CONFIRMED_TEST_COMMENT, OWNER_CONFIRMED_TEST_REVIEW, run_ai9_preview
@@ -347,7 +347,7 @@ def get_analytics_store() -> AnalyticsStore:
     return _ANALYTICS_STORE
 
 
-def _analytics_property_is_public(property_id: str) -> bool:
+def _analytics_property_is_public(property_id: str, publication_id: str) -> bool:
     center = REVIEW_CENTER
     if center is None:
         return False
@@ -355,6 +355,8 @@ def _analytics_property_is_public(property_id: str) -> bool:
         center._load_packages()
         package, decision = _latest_public_release(center, property_id)
         if not package or not decision or decision.get("action") != "APPROVE_PUBLICATION":
+            return False
+        if (decision.get("publication_id") or public_release_id(decision)) != publication_id:
             return False
         review_id = str(package.get("review_id") or "")
         snapshot = _public_release_snapshot(center, review_id, cleanup_stale_preview=False)
@@ -531,6 +533,7 @@ def _public_release_snapshot(center: ReviewCenter, review_id: str, *, cleanup_st
         "canonical_facts": canonical_facts, "media_summary": media_summary,
         "release_action": latest_release.get("action") if belongs_to_review and latest_release else None,
         "release_owner_id": latest_release.get("owner_id") if belongs_to_review and latest_release else None,
+        "publication_id": (latest_release.get("publication_id") or public_release_id(latest_release)) if belongs_to_review and own_active else None,
         "release_review_revision": latest_release.get("review_revision") if belongs_to_review and latest_release else None,
         "blockers": list(dict.fromkeys(blockers)), "can_approve": can_approve,
         "can_revoke": can_revoke, "preview_removed": preview_removed,
@@ -1274,6 +1277,7 @@ class Handler(BaseHTTPRequestHandler):
                         "property_revision": expected_property_revision,
                         "decision_owner": owner_id,
                         "projection_id": projection_result["projection"]["projectionId"],
+                        "publication_id": projection_result["projection"]["publicationId"],
                         "preview_records": artifact_result["records"], "preview_removed": 0,
                     }, 201)
                     return

@@ -6,19 +6,21 @@ import json
 import os
 import selectors
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER_PASSWORD = "TEST_ONLY-admin-password-e2e-2026"
-CUSTOMER_PASSWORD = "TEST_ONLY-customer-password-e2e-2026"
 ORIGIN_LABEL = "TEST_ONLY"
 PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082")
 
@@ -113,7 +115,7 @@ def serve_until_stopped(server: Any) -> None:
     serving.join(timeout=3)
 
 
-def child_env(root: Path, mode: str, port: int = 0) -> dict[str, str]:
+def child_env(root: Path, mode: str, port: int = 0, *, customer_port: int = 0, admin_url: str | None = None) -> dict[str, str]:
     env = {
         "PATH": os.defpath,
         "PYTHONPATH": str(ROOT),
@@ -138,6 +140,7 @@ def child_env(root: Path, mode: str, port: int = 0) -> dict[str, str]:
             "BMT_ENV": "test",
             "BMT_OPENAI_EXTRACTION": "0",
             "BMT_OPENAI_CONTENT_LIVE": "0",
+            "BMT_ANALYTICS_ALLOWED_ORIGINS": f"http://127.0.0.1:{customer_port}" if customer_port else "",
             "BMT_AUTH_DIAGNOSTIC_ACTIVATION_FILE": str(root / "no-auth-diagnostic-activation"),
             "BMT_AUTH_DIAGNOSTIC_MARKER_FILE": str(root / "no-auth-diagnostic-marker"),
         })
@@ -145,11 +148,12 @@ def child_env(root: Path, mode: str, port: int = 0) -> dict[str, str]:
         env.update({
             "SALA_BIND_HOST": "127.0.0.1",
             "SALA_PORT": str(port),
-            "SALA_DB_PATH": str(root / "customer-private" / "customer.sqlite3"),
-            "SALA_OWNER_PASSWORD": CUSTOMER_PASSWORD,
+            "SALA_DB_PATH": str(root / "customer-private" / "unused.sqlite3"),
             "SALA_ALLOWED_ORIGINS": "",
             "SALA_PUBLIC_PROJECTION_PATH": str(root / "tmp" / "admin-preview" / "data" / "listings.json"),
             "SALA_PUBLIC_ASSETS_ROOT": str(root / "public-assets"),
+            "SALA_ADMIN_ANALYTICS_URL": admin_url or "",
+            "SALA_ENV": "test",
         })
     return env
 
@@ -174,7 +178,7 @@ def run_child() -> None:
         store = PropertyStore(private / "property-core.sqlite3")
         center = ReviewCenter(store)
         adm.configure_review_center(center)
-        server = ThreadingHTTPServer(("127.0.0.1", 0), adm.Handler)
+        server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("BMT_ADMIN_PORT", "0"))), adm.Handler)
         server.daemon_threads = True
         adm.PORT = server.server_address[1]
         origin = f"http://127.0.0.1:{adm.PORT}"
@@ -191,14 +195,17 @@ def run_child() -> None:
 
     from customer_web_v2.sala_web import Application
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("SALA_PORT", "0"))), __import__("http.server").server.BaseHTTPRequestHandler)
     port = server.server_address[1]
     origin = f"http://127.0.0.1:{port}"
     os.environ["SALA_ALLOWED_ORIGINS"] = origin
     app = Application(
-        os.environ["SALA_DB_PATH"], CUSTOMER_PASSWORD, {origin},
+        os.environ["SALA_DB_PATH"], None, {origin},
         public_projection_path=os.environ["SALA_PUBLIC_PROJECTION_PATH"],
         public_assets_root=os.environ["SALA_PUBLIC_ASSETS_ROOT"],
+        analytics_relay_url=os.environ.get("SALA_ADMIN_ANALYTICS_URL"),
+        test_mode=os.environ.get("SALA_ENV") == "test",
+        legacy_owner_enabled=False,
     )
     class Handler(__import__("http.server").server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -268,7 +275,7 @@ def run_e2e() -> None:
     root.chmod(0o700)
     tmp_root = root / "tmp"
     tmp_root.mkdir(mode=0o700)
-    for name in ("admin-private", "customer-private", "public-assets"):
+    for name in ("admin-private", "public-assets"):
         (root / name).mkdir(mode=0o700)
     (root / "admin-owner-password").write_text(OWNER_PASSWORD, encoding="utf-8")
     (root / "admin-owner-password").chmod(0o600)
@@ -276,27 +283,32 @@ def run_e2e() -> None:
     asset.parent.mkdir(mode=0o700, parents=True)
     asset.write_bytes(PNG)
     asset.chmod(0o600)
-    evidence["isolation"] = {"root_mode": oct(root.stat().st_mode & 0o777), "paths": ["/private/tmp/<isolated-run>/{tmp,admin-private,customer-private,public-assets}"], "real_paths_opened": False}
+    evidence["isolation"] = {"root_mode": oct(root.stat().st_mode & 0o777), "paths": ["/private/tmp/<isolated-run>/{tmp,admin-private,public-assets}"], "real_paths_opened": False}
 
     admin = customer = None
     store = None
     try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        customer_port = probe.getsockname()[1]
+        probe.close()
         admin = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--child"], cwd=ROOT,
-                                 env=child_env(root, "admin"), stdin=subprocess.DEVNULL,
+                                 env=child_env(root, "admin", customer_port=customer_port), stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         admin_ready = read_ready(admin)
+        admin_origin = f"http://127.0.0.1:{admin_ready['port']}"
         customer = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--child"], cwd=ROOT,
-                                    env=child_env(root, "customer"), stdin=subprocess.DEVNULL,
+                                    env=child_env(root, "customer", customer_port, customer_port=customer_port,
+                                                  admin_url=admin_origin + "/api/analytics/events"), stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         customer_ready = read_ready(customer)
-        admin_origin = f"http://127.0.0.1:{admin_ready['port']}"
         customer_origin = f"http://127.0.0.1:{customer_ready['port']}"
         evidence["processes"] = {"admin": admin_ready, "customer": customer_ready}
         evidence["ports"] = [admin_ready["port"], customer_ready["port"]]
         config_fingerprint = {
             "bind_hosts": [admin_ready["host"], customer_ready["host"]],
             "port_mode": "OS-assigned ephemeral; active sockets distinct",
-            "storage_roots": ["<TEMP>/admin-private", "<TEMP>/customer-private", "<TEMP>/tmp/admin-preview", "<TEMP>/public-assets"],
+            "storage_roots": ["<TEMP>/admin-private", "<TEMP>/tmp/admin-preview", "<TEMP>/public-assets"],
             "openai_extraction": False, "openai_content_live": False,
             "test_owner_only": True,
         }
@@ -307,20 +319,19 @@ def run_e2e() -> None:
         check(request(customer_origin + "/health")[0] == 200, "customer_health_http", evidence, "HTTP 200")
         check(all(p not in {8765, 18876, 18877, 8876, 18878} for p in evidence["ports"]), "reserved_ports_untouched", evidence)
 
-        # Customer legacy B store contains an approved TEST_ONLY row; this must never be a public fallback.
-        status, h, login = json_call(customer_origin + "/api/login", method="POST", obj={"password": CUSTOMER_PASSWORD}, headers={"Origin": customer_origin})
-        check(status == 200 and login.get("ok") is True, "customer_synthetic_login", evidence, f"HTTP {status}")
-        customer_cookie = cookie_value(h.get("Set-Cookie", ""), "sala_owner_session")
-        field_body = {"transaction_type": "SALE", "property_type": "TEST_ONLY legacy house", "title": "TEST_ONLY legacy approved row", "description": "Synthetic legacy-only record", "price_vnd": "1000000000", "area_m2": "50", "location": "TEST_ONLY legacy location", "source": "TEST_ONLY"}
-        content_type, body = multipart(field_body, "legacy.png", PNG)
-        headers = {"Origin": customer_origin, "Cookie": f"sala_owner_session={customer_cookie}", "Content-Type": content_type}
-        status, _, receipt = request(customer_origin + "/api/intakes", method="POST", data=body, headers=headers)
-        legacy_id = json.loads(receipt)["listing_id"] if status == 201 else None
-        check(status == 201 and legacy_id, "customer_legacy_intake_fixture", evidence, f"HTTP {status}")
-        status, _, _ = json_call(customer_origin + f"/api/listings/{legacy_id}/review", method="POST", obj={"action": "approve"}, headers={"Origin": customer_origin, "Cookie": f"sala_owner_session={customer_cookie}"})
-        check(status == 200, "customer_legacy_approved_fixture", evidence, f"HTTP {status}")
-        status, _, _ = request(customer_origin + "/api/listings")
-        check(status == 503, "missing_projection_no_fallback", evidence, f"HTTP {status}")
+        # Public Customer build has no second Owner or Property Master surface.
+        status, _, health = json_call(customer_origin + "/health")
+        check(status == 200 and health.get("storage") == "admin_projection", "customer_projection_only_health", evidence, f"HTTP {status}")
+        status, _, _ = json_call(customer_origin + "/api/login", method="POST", obj={"password": "TEST_ONLY-not-used"}, headers={"Origin": customer_origin})
+        check(status == 404, "customer_legacy_login_disabled", evidence, f"HTTP {status}")
+        status, _, _ = request(customer_origin + "/api/admin/listings")
+        check(status == 404, "customer_legacy_admin_disabled", evidence, f"HTTP {status}")
+        content_type, body = multipart({"title": "TEST_ONLY must not write"}, "ignored.png", PNG)
+        status, _, _ = request(customer_origin + "/api/intakes", method="POST", data=body,
+                               headers={"Origin": customer_origin, "Content-Type": content_type})
+        check(status == 404, "customer_legacy_intake_disabled", evidence, f"HTTP {status}")
+        customer_db = root / "customer-private" / "unused.sqlite3"
+        check(not customer_db.exists() and not customer_db.parent.exists(), "customer_store_not_created", evidence)
 
         # Synthetic owner login for the real Admin HTTP handlers (not a second production account).
         admin_headers = {"Origin": admin_origin}
@@ -416,17 +427,48 @@ def run_e2e() -> None:
         listing = feed["items"][0]
         check(listing["property_id"] == property_id and listing["property_revision"] == 1 and listing["projection_id"] == rows[0]["projectionId"],
               "feed_identity_and_revision_linkage", evidence)
+        publication_id = listing["publication_id"]
+        check(publication_id == rows[0]["publicationId"], "feed_publication_id_linkage", evidence)
         status, _, detail_raw = request(customer_origin + "/api/listings/" + listing["listing_id"])
         detail = json.loads(detail_raw)
-        check(status == 200 and detail.get("property_id") == property_id and detail.get("property_revision") == 1,
+        check(status == 200 and detail.get("property_id") == property_id and detail.get("property_revision") == 1 and detail.get("publication_id") == publication_id,
               "customer_http_detail", evidence, f"HTTP {status}")
         check("owner_contact" not in detail and detail.get("media"), "detail_private_fields_and_media_allowlist", evidence)
         media_id = detail["media"][0]["media_id"]
         status, media_headers, media_bytes = request(customer_origin + "/media/" + media_id)
         check(status == 200 and media_bytes == PNG and media_headers.get("Content-Type") == "image/png",
               "customer_http_approved_media", evidence, f"HTTP {status}")
-        check(all(item["title"] != "TEST_ONLY legacy approved row" for item in feed["items"]),
-              "legacy_approved_customer_row_not_public", evidence)
+        check(not customer_db.exists(), "customer_legacy_store_absent_during_public_reads", evidence)
+
+        # Real HTTP Customer -> relay -> Admin analytics, all events bound to the active publication.
+        traffic_events = [
+            {"event_id": str(uuid.uuid4()), "event_type": "page_view", "page_type": "listing_detail",
+             "property_id": property_id, "publication_id": publication_id, "utm_source": "qr", "utm_medium": "referral"},
+            {"event_id": str(uuid.uuid4()), "event_type": "property_detail_view",
+             "property_id": property_id, "publication_id": publication_id},
+            {"event_id": str(uuid.uuid4()), "event_type": "contact_cta_click",
+             "property_id": property_id, "publication_id": publication_id, "channel": "other"},
+        ]
+        for event in traffic_events:
+            status, _, receipt = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
+                                           headers={"Origin": customer_origin})
+            check(status == 202 and receipt == {"accepted": True, "duplicate": False},
+                  "customer_http_event_receipt", evidence, f"HTTP {status}")
+            status, _, replay = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
+                                          headers={"Origin": customer_origin})
+            check(status == 200 and replay == {"accepted": True, "duplicate": True},
+                  "customer_http_event_idempotent_replay", evidence, f"HTTP {status}")
+        invalid_event = {**traffic_events[1], "event_id": str(uuid.uuid4()), "publication_id": "publication-00000000000000000000000000000000"}
+        status, _, _ = json_call(customer_origin + "/api/analytics/events", method="POST", obj=invalid_event,
+                                 headers={"Origin": customer_origin})
+        check(status == 422, "customer_http_stale_publication_event_denied", evidence, f"HTTP {status}")
+        private_event = {**traffic_events[1], "event_id": str(uuid.uuid4()), "phone": "0901234567"}
+        status, _, _ = json_call(customer_origin + "/api/analytics/events", method="POST", obj=private_event,
+                                 headers={"Origin": customer_origin})
+        check(status == 422, "customer_http_private_event_field_denied", evidence, f"HTTP {status}")
+        report_day = datetime.now(timezone.utc).date().isoformat()
+        status, _, event_report = json_call(admin_origin + f"/api/analytics/report?from={report_day}&to={report_day}&property_id={property_id}", headers=admin_headers)
+        check(status == 200 and event_report.get("total_events") == 3, "admin_http_owner_event_report", evidence, f"HTTP {status}")
 
         # Replay cannot duplicate. Rejected rights/private DTOs disappear from public list/media.
         status, _, _ = json_call(admin_origin + f"/api/reviews/{review_id}/public-release/approve", method="POST",
@@ -470,12 +512,16 @@ def run_e2e() -> None:
               json.loads(request(customer_origin + "/api/listings")[2]).get("items") == [],
               "customer_revoked_projection_empty", evidence)
         check(request(customer_origin + "/media/" + media_id)[0] == 404, "customer_revoked_media_hidden", evidence, "HTTP 404")
+        status, _, revoked_event = json_call(customer_origin + "/api/analytics/events", method="POST",
+                                              obj={**traffic_events[1], "event_id": str(uuid.uuid4())},
+                                              headers={"Origin": customer_origin})
+        check(status == 422, "customer_http_revoked_publication_event_denied", evidence, f"HTTP {status}")
 
         evidence["test_only_counts"] = {"admin_intakes": 1, "reviews": 1, "property_core": len(store.list_properties()),
                                         "admin_public_rows_after_revoke": len(json.loads(web_path.read_text(encoding="utf-8"))),
-                                        "customer_legacy_approved_rows": 1}
+                                        "customer_legacy_property_rows": 0}
         evidence["fixture_sha256"] = hashlib.sha256(PNG).hexdigest()
-        evidence["traffic_cta_events"] = "NOT_VERIFIED (outside this read projection increment)"
+        evidence["traffic_cta_events"] = {"status": "PASS_HTTP", "accepted": 3, "replays": 3, "after_revoke": 422}
         evidence["status"] = "ISOLATED_HTTP_E2E_PASS"
     except Exception as exc:
         evidence["status"] = "ISOLATED_HTTP_E2E_PARTIAL"

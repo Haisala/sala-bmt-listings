@@ -145,6 +145,7 @@ class CustomerProjectionIntegrationTests(unittest.TestCase):
         self.assertEqual(listing["property_id"], dto["propertyId"])
         self.assertEqual(listing["property_revision"], dto["propertyRevision"])
         self.assertEqual(listing["projection_id"], dto["projectionId"])
+        self.assertEqual(listing["publication_id"], dto["publicationId"])
         self.assertEqual(listing["publication_revision"], dto["publicationRevision"])
         self.assertEqual(self.app.handle("GET", "/api/listings?transaction_type=RENT").body, b'{"items":[]}')
         detail = self.app.handle("GET", "/api/listings/" + listing["listing_id"])

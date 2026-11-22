@@ -4,10 +4,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-REQUIRED = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "propertyId", "propertyRevision", "projectionId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
+REQUIRED = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
 STATUSES = {"Đang bán", "Đang cho thuê", "Đã cho thuê", "Đã cọc", "Đã bán"}
 PRIVATE_KEYS = {"internal_analysis", "candidate", "source_bundle", "owner_contact", "credentials", "private_media_path", "rights_evidence"}
-ALLOWED_FIELDS = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "category", "propertyType", "addressText", "areas", "transactionType", "priceLabel", "priceNote", "priceUnit", "area", "dimensions", "width", "length", "landArea", "legal", "road", "description", "videos", "reelUrl", "createdAt", "locationNotes", "featured", "goodPrice", "propertyId", "propertyRevision", "projectionId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
+ALLOWED_FIELDS = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "category", "propertyType", "addressText", "areas", "transactionType", "priceLabel", "priceNote", "priceUnit", "area", "dimensions", "width", "length", "landArea", "legal", "road", "description", "videos", "reelUrl", "createdAt", "locationNotes", "featured", "goodPrice", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
 
 
 class PublicContractError(ValueError):
@@ -20,6 +20,8 @@ def validate_public_dto(dto: dict[str, Any]) -> dict[str, Any]:
         raise PublicContractError("MISSING_REQUIRED:" + ",".join(missing))
     if int(dto["propertyRevision"]) < 1:
         raise PublicContractError("PROPERTY_REVISION_REQUIRED")
+    if not re.fullmatch(r"publication-[a-f0-9]{32}", str(dto["publicationId"])):
+        raise PublicContractError("PUBLICATION_ID_INVALID")
     if dto["sourceSystem"] != "SALA_PROPERTY_CORE":
         raise PublicContractError("PUBLIC_SOURCE_REQUIRED")
     if (dto["publicationStatus"] != "APPROVED"
