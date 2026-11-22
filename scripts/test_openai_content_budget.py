@@ -67,6 +67,9 @@ def main():
     size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     assert request["text"]["format"]["schema"]["properties"]["variants"]["maxItems"] == 3
     assert request["reasoning"]["effort"] == "low"
+    variant_schema = request["text"]["format"]["schema"]["properties"]["variants"]["items"]["properties"]
+    assert variant_schema["title"]["maxLength"] == 80 and variant_schema["body"]["maxLength"] == 420
+    assert variant_schema["facts_used"]["maxItems"] == 6
     input_upper_bound = (len(request["instructions"].encode()) + len(request["input"].encode())
                          + len(json.dumps(request["text"]["format"]["schema"], separators=(",", ":")).encode())
                          + len("content_studio_three"))

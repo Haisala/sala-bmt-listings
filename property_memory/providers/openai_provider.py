@@ -43,11 +43,11 @@ CONTENT_RESPONSE_SCHEMA = {
         "type": "object", "additionalProperties": False,
         "properties": {
             "angle": {"type": "string", "enum": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"]},
-            "body": {"type": "string"}, "title": {"type": "string"},
-            "facts_used": {"type": "array", "items": {"type": "string"}},
-            "claims": {"type": "array", "items": {"type": "string"}},
-            "unknowns": {"type": "array", "items": {"type": "string"}},
-            "warnings": {"type": "array", "items": {"type": "string"}},
+            "body": {"type": "string", "maxLength": 420}, "title": {"type": "string", "maxLength": 80},
+            "facts_used": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
+            "claims": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
+            "unknowns": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
+            "warnings": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
         },
         "required": ["angle", "body", "title", "facts_used", "claims", "unknowns", "warnings"],
     }}},
@@ -118,15 +118,14 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
     if model != DEFAULT_EXTRACTION_MODEL or max_output_tokens != MAX_CONTENT_OUTPUT_TOKENS:
         raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
     facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
-    instructions = ("Write 3 distinct Vietnamese property drafts, one per angle. Use only listed facts. "
-                    "Do not invent legal status, ownership, amenities, returns, or media rights. List claims, unknowns, warnings. JSON only.")
+    instructions = ("Write 3 Vietnamese property drafts, one per angle. Title <=80 chars; body <=420. "
+                    "Facts only; metadata lists <=3. Never invent legal status, ownership, amenities, returns, or rights. JSON.")
     schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
-        allowed = {"facts": selected_facts, "angles": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"],
-                   "output_count": 3}
+        allowed = {"facts": selected_facts}
         request = {"model": model, "instructions": instructions,
                    "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
                    "reasoning": {"effort": "low"},
