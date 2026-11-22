@@ -123,8 +123,9 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
     schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"generation_id": payload.get("generation_id"), "facts_revision_id": payload.get("facts_revision_id"),
-                   "facts": selected_facts, "angles": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"],
+        # Lineage identifiers remain attached to the saved batch/receipt; the
+        # model needs only approved facts, so do not spend prompt tokens on IDs.
+        allowed = {"facts": selected_facts, "angles": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"],
                    "output_count": 3}
         request = {"model": model, "instructions": instructions,
                    "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),

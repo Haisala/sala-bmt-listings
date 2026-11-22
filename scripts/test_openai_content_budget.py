@@ -50,9 +50,12 @@ def main():
         "description": "TEST_ONLY " + "synthetic factual detail " * 20,
         "owner_contact": "TEST_ONLY_PRIVATE_MUST_NOT_BE_SENT",
     }
-    request = build_content_request({"generation_id": "TEST_ONLY", "facts_revision_id": "facts-test-r1",
+    request = build_content_request({"generation_id": "ai-run-" + "a" * 24,
+                                    "facts_revision_id": "facts-property-" + "b" * 24 + "-r1",
                                     "facts": realistic_facts}, "gpt-6-luna")
-    sent_facts = json.loads(request["input"])["facts"]
+    request_input = json.loads(request["input"])
+    sent_facts = request_input["facts"]
+    assert "generation_id" not in request_input and "facts_revision_id" not in request_input
     assert sent_facts and "owner_contact" not in sent_facts
     assert {"title", "property_type", "address", "area", "price_vnd", "price_type", "legal_status"} <= set(sent_facts)
     assert set(sent_facts).issubset({
