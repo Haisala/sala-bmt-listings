@@ -76,6 +76,17 @@ Nguồn đầy đủ: [MASTER 5 PHASE #7058182954](https://github.com/Haisala/sa
 - **Khi Codex trả RESULT:** đối chiếu duy nhất RESULT mới với TASK, yêu cầu, SHA và môi trường; cập nhật Tầng 3 → thay delta tại Tầng 1. Chỉ sửa Tầng 2 khi Owner chốt quyết định mới. Không tự tạo checkpoint/task/PR/phase song song vì đổi chat.
 - Owner chốt phạm vi và GO; ChatGPT quản trị/đối chiếu; Codex triển khai trong phạm vi riêng được phép. Không sửa SALA Media/NaviBDS/hệ thống khác.
 
+## D08 — Owner GO cho tích hợp nguồn đọc First Web (increment cô lập) — APPROVED 22/11/2026
+
+**Căn cứ:** [RESULT đối chiếu Admin/Customer Web #7071851933](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071851933) và [Owner GO thực hiện #7071923255](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7071923255).
+
+- **Đã chứng minh ở mức source/runtime:** năm nhóm trách nhiệm trùng/đè lên nhau (Owner login, intake/edit/media, Property identity/Core, review, visibility/publication), hai dịch vụ localhost trả health, public apex vẫn maintenance. **Chưa chứng minh có hai bản ghi thật bị trùng**, không được xóa DB dựa vào nghi vấn.
+- **Quyết định Owner:** Admin SALA BĐS/Property Master là nguồn dữ liệu chuẩn và nơi quản trị nghiệp vụ; Customer Web chỉ đọc **approved revision-bound projection** đã qua Gate A và Web publication riêng biệt. Giữ nguyên mã UI/public route hữu ích, không làm web-only canonical Core nữa.
+- **Được phép ngay:** Codex sửa mã tích hợp **nhỏ, cô lập trên nhánh review PR #44**, test với fixture/DB tổng hợp để nối public Feed/Search/Detail/Media của Customer Web tới Admin-approved projection; fail closed khi chưa duyệt, dữ liệu stale/revoke/invalid; lập và lưu kế hoạch bảo toàn dữ liệu Customer Web.
+- **Chưa được phép:** đọc/ghi/chuyển đổi/xóa/backup DB thật, ngừng Owner panel/intake/review routes trong runtime thực, gỡ mã legacy, hợp nhất login thật, merge/main, staging/production deploy/DNS/tunnel, API trả phí, mở Phase 2. Các bước thay thế chức năng hoặc data migration phải có bằng chứng test và Owner GO riêng.
+- **Không đổi mục tiêu cấp trên:** một phiên Owner login bằng mật khẩu hiện tại, một Property Master, Web Admin là phân hệ xuất bản/bảo trì. Code release khác data; rollback mã không ghi đè dữ liệu thật. Giữ AI9/Content/provider có ích nhưng dormant theo D06.
+- **Gate bước này:** chỉ công nhận `LOCAL_SYNTHETIC_PROJECTION_INTEGRATION` khi file/commit và test positive/negative có receipt. Đây **không phải** `FIRST_WEB_CORE_READY_TO_SKIN`, `Phase1_UNIFIED_PASS`, `staging` hoặc `production` acceptance.
+
 ## Lưu ý về authority
 
 [Blueprint V1.0](../SALA_BDS_MASTER_SYSTEM_WEB_FIRST_BLUEPRINT_V1_OWNER_APPROVED.md) là **design target**; các quyết định Owner sau đó trong [Issue #39](https://github.com/Haisala/sala-bmt-listings/issues/39) và [Issue #38](https://github.com/Haisala/sala-bmt-listings/issues/38) bổ sung/thay thế trong **đúng phạm vi**. Không biến thiết kế cũ AI9 chín khối thành lệnh chạy chín API hoặc ép hoàn thành các phân hệ khác trước First Web. Phần lịch sử mô tả Issue trước chuẩn hóa được giữ nguyên tại [archive](./SALA_BDS_ISSUE39_PRE_3T_ARCHIVE.md).
