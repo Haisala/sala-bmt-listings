@@ -40,8 +40,27 @@ def variants():
 
 
 def main():
+    realistic_facts = {
+        "title": "TEST_ONLY Synthetic Home", "property_type": "HOUSE",
+        "address": "TEST_ONLY fabricated address", "area": "72.5 m²",
+        "width": 5, "length": 14.5, "land_area": 72.5, "price_type": "SALE",
+        "price_vnd": 2500000000, "legal_status": "CERTIFICATE",
+        "road_access": "TEST_ONLY road", "house_type": "TEST_ONLY house",
+        "bedrooms": 2, "bathrooms": 1,
+        "description": "TEST_ONLY " + "synthetic factual detail " * 20,
+        "owner_contact": "TEST_ONLY_PRIVATE_MUST_NOT_BE_SENT",
+    }
     request = build_content_request({"generation_id": "TEST_ONLY", "facts_revision_id": "facts-test-r1",
-                                    "facts": {"title": "TEST_ONLY synthetic apartment"}}, "gpt-6-luna")
+                                    "facts": realistic_facts}, "gpt-6-luna")
+    sent_facts = json.loads(request["input"])["facts"]
+    assert sent_facts and "owner_contact" not in sent_facts
+    assert {"title", "property_type", "address", "area", "price_vnd", "price_type", "legal_status"} <= set(sent_facts)
+    assert set(sent_facts).issubset({
+        "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
+        "price", "price_type", "legal_status", "house_type", "bedrooms", "bathrooms",
+        "road_access", "features", "description",
+    })
+    assert len(sent_facts.get("description", "")) <= 160
     size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     assert request["text"]["format"]["schema"]["properties"]["variants"]["maxItems"] == 3
     input_upper_bound = (len(request["instructions"].encode()) + len(request["input"].encode())
@@ -50,11 +69,8 @@ def main():
     assert input_upper_bound <= MAX_CONTENT_INPUT_TOKENS
     assert size < MAX_CONTENT_REQUEST_BYTES
     assert _content_cost_upper_bound(size, 900) < 0.01
-    try:
-        build_content_request({"facts": {"description": "TEST_ONLY " + "x" * 9000}}, "gpt-6-luna")
-        raise AssertionError("oversized input was accepted")
-    except ValueError as exc:
-        assert str(exc) == "CONTENT_INPUT_LIMIT_EXCEEDED"
+    truncated = build_content_request({"facts": {"description": "TEST_ONLY " + "x" * 9000}}, "gpt-6-luna")
+    assert len(json.loads(truncated["input"])["facts"]["description"]) == 160
     try:
         build_content_request({"facts": {}}, "unexpected-model")
         raise AssertionError("unapproved model was accepted")
@@ -70,7 +86,7 @@ def main():
 
     bad_transport = Transport(variants() + [variants()[0], variants()[1]])
     try:
-        OpenAIPropertyProvider(api_key="TEST_ONLY_KEY", transport=bad_transport).generate({"facts": {}})
+        OpenAIPropertyProvider(api_key="TEST_ONLY_KEY", transport=bad_transport).generate({"facts": {"title": "TEST_ONLY"}})
         raise AssertionError("five-variant response was accepted")
     except ProviderError as exc:
         assert exc.code == "MALFORMED_CONTENT_OUTPUT"

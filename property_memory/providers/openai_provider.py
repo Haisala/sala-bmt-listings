@@ -58,6 +58,11 @@ MAX_CONTENT_REQUEST_BYTES = 8000
 MAX_CONTENT_INPUT_TOKENS = 1200
 MAX_CONTENT_OUTPUT_TOKENS = 900
 MAX_CONTENT_COST_USD = 0.01
+CONTENT_FACT_PRIORITY = (
+    "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
+    "price", "price_type", "legal_status", "house_type", "bedrooms", "bathrooms",
+    "road_access", "features", "description",
+)
 
 class ProviderError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False, diagnostics: dict[str, Any] | None = None):
@@ -112,21 +117,45 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
     """Build one bounded three-variant request from revision-bound approved facts."""
     if model != DEFAULT_EXTRACTION_MODEL or max_output_tokens != MAX_CONTENT_OUTPUT_TOKENS:
         raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
-    allowed = {"generation_id": payload.get("generation_id"), "facts_revision_id": payload.get("facts_revision_id"),
-               "facts": payload.get("facts") or {}, "angles": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"],
-               "output_count": 3}
-    instructions = ("Write exactly 3 distinct private Vietnamese property variants, one per angle. "
-                    "Use only supplied facts; facts_used must be exact keys from facts. "
-                    "Do not invent legality, ownership, amenities, returns, or media rights. List claims, unknowns, warnings. JSON only.")
-    request = {"model": model, "instructions": instructions, "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
-               "max_output_tokens": max_output_tokens,
-               "text": {"format": {"type": "json_schema", "name": "content_studio_three", "strict": True, "schema": CONTENT_RESPONSE_SCHEMA}}}
-    request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
+    instructions = ("Write 3 distinct Vietnamese property drafts, one per angle. Use only listed facts. "
+                    "Do not invent legal status, ownership, amenities, returns, or media rights. List claims, unknowns, warnings. JSON only.")
     schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-    input_token_upper_bound = (len(instructions.encode("utf-8")) + len(request["input"].encode("utf-8"))
-                               + schema_bytes + len("content_studio_three"))
-    if request_bytes > MAX_CONTENT_REQUEST_BYTES or input_token_upper_bound > MAX_CONTENT_INPUT_TOKENS:
+
+    def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"generation_id": payload.get("generation_id"), "facts_revision_id": payload.get("facts_revision_id"),
+                   "facts": selected_facts, "angles": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"],
+                   "output_count": 3}
+        request = {"model": model, "instructions": instructions,
+                   "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
+                   "max_output_tokens": max_output_tokens,
+                   "text": {"format": {"type": "json_schema", "name": "content_studio_three", "strict": True,
+                                        "schema": CONTENT_RESPONSE_SCHEMA}}}
+        request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        input_token_upper_bound = (len(instructions.encode("utf-8")) + len(request["input"].encode("utf-8"))
+                                   + schema_bytes + len("content_studio_three"))
+        return request if request_bytes <= MAX_CONTENT_REQUEST_BYTES and input_token_upper_bound <= MAX_CONTENT_INPUT_TOKENS else None
+
+    selected: dict[str, Any] = {}
+    request = compose(selected)
+    for field in CONTENT_FACT_PRIORITY:
+        value = facts.get(field)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, str):
+            value = value[:160]
+        elif field == "features" and isinstance(value, list):
+            value = [str(item)[:80] for item in value[:5] if str(item).strip()]
+        elif not isinstance(value, (int, float, bool)):
+            continue
+        candidate = {**selected, field: value}
+        bounded = compose(candidate)
+        if bounded is not None:
+            selected = candidate
+            request = bounded
+    if request is None or not selected:
         raise ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")
+    request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     if _content_cost_upper_bound(request_bytes, max_output_tokens) >= MAX_CONTENT_COST_USD:
         raise ValueError("CONTENT_COST_CAP_EXCEEDED")
     return request
