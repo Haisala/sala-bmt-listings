@@ -109,8 +109,15 @@
 - **Trạng thái hiện hành:** `PR_MERGE_GO=NO`, `PHASE_1_UNIFIED=NOT_VERIFIED`, `PHASE_2=NO_GO`; không chứng minh one-session, traffic/CTA return, staging HTTPS, READY_TO_SKIN.
 - **Một việc ưu tiên tiếp theo:** Owner cấp/duyệt môi trường chạy Codex có quyền bind loopback TCP để **chạy lại đúng nhiệm vụ TEST_ONLY E2E cô lập**; tuyệt đối không sử dụng cổng đang chạy làm đường vòng hoặc nới quyền hệ thống khác. Không tự triển khai.
 
+## 6.4 Owner scoped-loopback permission GO — TASK posted, no permission proof yet
+
+- **TASK:** [Owner approval/request #7072339267](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072339267) to continue isolated HTTP E2E [#7072250230](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072250230); latest verified blocker [RESULT #7072294543](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7072294543).
+- **Known code baseline:** PR #44 head `bf7ebca0353ad2bf74b169b3c11a65f1bd2e05c0`, DRAFT/UNMERGED; real HTTP E2E `NOT_RUN`, bind permission `HTTP_BIND_BLOCKED`.
+- **Owner decision only:** Codex may request **single-run, scoped `127.0.0.1` TCP bind permission** through approved execution context. GitHub issue post does **not** change Codex/macOS permissions; no runtime started, no test result after task post. If host approval unavailable, Codex must report exact user-action blocker, not silently work around sandbox.
+- **Verification required for next RESULT:** actual granted permission, two separate sandbox server PIDs/ports bound, HTTP request/response matrix and negative tests, temp-only sources/media, existing processes untouched; `PR_MERGE_GO=NO`, `PHASE_2=NO_GO` until distinct Owner gate.
+
 ## 5. Quy tắc chứng minh/đổi chat
 
 Mỗi kết quả mới cần ghi: `TASK_URL`, `RESULT_URL`, repo/branch/commit HEAD, file path/diff/test, loại dữ liệu (synthetic/real), môi trường (local/staging/production), trạng thái PASS/FAIL/UNKNOWN và giới hạn; chỉ bổ sung **delta** mới. Khi một mục đã có receipt thì **không tự test lại** trừ xung đột/hệ quả mới. Không coi 404 từ phạm vi kiểm tra hẹp là chức năng không tồn tại toàn hệ thống. Tài liệu này là mục lục, không thay link RESULT gốc.
 
-**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Owner cấp/duyệt môi trường Codex cho phép loopback bind để rerun đúng isolated HTTP E2E sau `HTTP_BIND_BLOCKED` trong RESULT #7072294543; không mở Phase 2.
+**VỊ TRÍ:** SALA BĐS / FIRST WEB / Phase 1; PR #44 source integration đã đạt TEST_ONLY nhưng review PARTIAL. **BƯỚC TIẾP THEO DUY NHẤT:** Chờ Codex xác nhận quyền bind loopback được cấp trong môi trường thực thi và chạy lại task #7072250230; hoặc báo chính xác Owner action cần làm nếu sandbox từ chối. Phase 2 NO_GO.
