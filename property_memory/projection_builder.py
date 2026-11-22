@@ -94,7 +94,10 @@ def _is_public_asset_ref(ref: str, public_slug: str) -> bool:
         return False
     if path.parts[2] != public_slug or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".avif"}:
         return False
-    asset_root = PROJECT_ROOT.resolve()
+    configured_root = os.environ.get("BMT_ADMIN_PUBLIC_ASSETS_ROOT", "").strip()
+    if os.environ.get("BMT_ENV") == "staging" and not configured_root:
+        return False
+    asset_root = Path(configured_root).expanduser().resolve() if configured_root else PROJECT_ROOT.resolve()
     resolved = (asset_root / Path(*path.parts)).resolve()
     try:
         resolved.relative_to(asset_root)

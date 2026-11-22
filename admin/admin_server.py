@@ -54,7 +54,6 @@ INBOX_ROOT = PRIVATE_ROOT / "inbox"
 INDEX_PATH = PRIVATE_ROOT / "index.json"
 AUDIT_LOG_PATH = PRIVATE_ROOT / "audit.jsonl"
 ERROR_QUEUE_PATH = PRIVATE_ROOT / "error-queue.json"
-PUBLIC_DATA = PROJECT_ROOT / "data" / "listings.json"
 HOST = os.environ.get("BMT_ADMIN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("BMT_ADMIN_PORT", "8876"))
 PASSWORD_FILE = Path(os.environ.get("BMT_ADMIN_PASSWORD_FILE", "/Users/trandinhhieu/BMTPropertyHubPrivate/admin-password"))
@@ -393,6 +392,21 @@ def _public_preview_paths() -> tuple[Path, Path]:
     if not configured:
         raise ValueError("PREVIEW_TARGET_NOT_CONFIGURED")
     root = Path(configured).expanduser().resolve()
+    if os.environ.get("BMT_ENV") == "staging":
+        staging_root_value = os.environ.get("BMT_ADMIN_STAGING_ROOT", "").strip()
+        if not staging_root_value:
+            raise ValueError("PREVIEW_TARGET_UNSAFE")
+        staging_root_path = Path(staging_root_value).expanduser()
+        if staging_root_path.is_symlink() or not staging_root_path.is_dir():
+            raise ValueError("PREVIEW_TARGET_UNSAFE")
+        if staging_root_path.stat().st_mode & 0o077:
+            raise ValueError("PREVIEW_TARGET_UNSAFE")
+        expected = staging_root_path.resolve() / "public-preview"
+        if root != expected or root.is_symlink() or root == PROJECT_ROOT or PROJECT_ROOT in root.parents:
+            raise ValueError("PREVIEW_TARGET_UNSAFE")
+        if root.exists() and (not root.is_dir() or root.stat().st_mode & 0o077):
+            raise ValueError("PREVIEW_TARGET_UNSAFE")
+        return root / "canonical" / "projections.json", root / "data" / "listings.json"
     temp_root = Path(tempfile.gettempdir()).resolve()
     try:
         root.relative_to(temp_root)
@@ -537,6 +551,8 @@ def _public_release_snapshot(center: ReviewCenter, review_id: str, *, cleanup_st
         "property_revision": property_revision, "state": state,
         "canonical_facts": canonical_facts, "media_summary": media_summary,
         "selected_content": {k: content.get(k) for k in ("content_batch_id", "content_variant_id", "content_revision", "title") if content.get(k)},
+        "environment": os.environ.get("BMT_ENV", "unknown"),
+        "publication_mode": "STAGING_PUBLIC" if os.environ.get("BMT_ENV") == "staging" else "PRIVATE_PREVIEW",
         "release_action": latest_release.get("action") if belongs_to_review and latest_release else None,
         "release_owner_id": latest_release.get("owner_id") if belongs_to_review and latest_release else None,
         "publication_id": (latest_release.get("publication_id") or public_release_id(latest_release)) if belongs_to_review and own_active else None,
@@ -813,12 +829,12 @@ EVIDENCE_UI = '''<section id="owner-evidence" class="card" style="margin-top:16p
 PUBLIC_RELEASE_UI = '''<script>
 (()=>{
 const priorLoadReview=window.loadReview;
-const stateLabels={NOT_APPROVED:'Chưa duyệt đăng Website',PUBLIC_ALLOWED:'Đã cho phép preview riêng · chưa public',PUBLIC_ALLOWED_OTHER_REVIEW:'Property đang gắn quyết định ở review khác',REVOKED:'Đã thu hồi quyền preview',STALE:'Revision cũ · cần duyệt lại',INELIGIBLE:'Chưa đủ điều kiện'};
+const stateLabels={NOT_APPROVED:'Chưa duyệt đăng Website',PUBLIC_ALLOWED:'Owner đã duyệt revision này',PUBLIC_ALLOWED_OTHER_REVIEW:'Property đang gắn quyết định ở review khác',REVOKED:'Đã thu hồi công bố',STALE:'Revision cũ · cần duyệt lại',INELIGIBLE:'Chưa đủ điều kiện'};
 const blockerLabels={GATE_A_APPROVAL_REQUIRED:'Cần Gate A APPROVED đúng revision.',PROPERTY_NOT_FOUND:'Không tìm thấy canonical Property Core.',PROPERTY_REVISION_REQUIRED:'Thiếu revision Property Core.',PUBLIC_FACTS_INCOMPLETE:'Thiếu facts bắt buộc đã xác nhận.',PUBLIC_PRICE_INVALID:'Giá không hợp lệ.',LEGAL_STATUS_UNCONFIRMED:'Pháp lý chưa được xác nhận.',TRANSACTION_TYPE_UNCONFIRMED:'Chưa xác nhận bán/thuê.',PUBLIC_STATUS_UNSUPPORTED:'Trạng thái tin chưa được hỗ trợ.',RENT_PERIOD_UNSUPPORTED:'Chỉ hỗ trợ giá thuê theo tháng.',PROVENANCE_APPEARANCE_REQUIRED:'Thiếu provenance nguồn.',OPEN_PROPERTY_CONFLICTS:'Còn xung đột dữ liệu chưa xử lý.',PUBLIC_MEDIA_RIGHTS_DENIED:'Ảnh/file chưa có quyền public_web được duyệt.',PUBLIC_MEDIA_REFERENCE_UNSAFE:'Ảnh chưa nằm trong thư mục asset công khai hợp lệ.',PREVIEW_TARGET_NOT_CONFIGURED:'Chưa cấu hình thư mục preview tạm an toàn.',PREVIEW_TARGET_UNSAFE:'Đích preview nằm ngoài vùng tạm an toàn.',PUBLIC_RELEASE_ACTIVE_OTHER_REVIEW:'Đã có release hiện hành ở review khác.',PREVIEW_WITHDRAWAL_FAILED:'Không thu hồi được artifact preview cũ.'};
-window.loadReview=async function(id){await priorLoadReview(id);const detail=document.querySelector('#review-detail');if(!detail)return;const reviewResponse=await fetch('/api/reviews/'+encodeURIComponent(id),{credentials:'same-origin'});const review=await reviewResponse.json();if(!reviewResponse.ok)return;const panel=document.createElement('section');panel.id='public-release';panel.className='item';panel.innerHTML='<h4>Duyệt công bố riêng</h4><p class="muted">Tách biệt Gate A. Chỉ tạo/cập nhật preview tạm; thao tác này chưa phát hành công khai.</p><p data-release-status>Đang kiểm tra...</p><p data-release-lineage class="muted"></p><p data-release-facts class="muted"></p><p data-release-media class="muted"></p><ul data-release-blockers class="err"></ul><div class="row"><button type="button" data-release-approve style="min-height:44px;flex:1 1 180px">Duyệt tạo preview Website</button><button type="button" data-release-revoke class="secondary" style="min-height:44px;flex:1 1 180px">Thu hồi preview</button></div><p data-release-message class="muted" role="status"></p>';
+window.loadReview=async function(id){await priorLoadReview(id);const detail=document.querySelector('#review-detail');if(!detail)return;const reviewResponse=await fetch('/api/reviews/'+encodeURIComponent(id),{credentials:'same-origin'});const review=await reviewResponse.json();if(!reviewResponse.ok)return;const panel=document.createElement('section');panel.id='public-release';panel.className='item';panel.innerHTML='<h4>Duyệt công bố Website</h4><p class="muted">Quyết định riêng với Gate A. Staging sẽ công khai trên Customer staging; private test chỉ tạo preview. Production chỉ đổi bằng Owner-triggered deploy.</p><p data-release-status>Đang kiểm tra...</p><p data-release-lineage class="muted"></p><p data-release-facts class="muted"></p><p data-release-media class="muted"></p><ul data-release-blockers class="err"></ul><div class="row"><button type="button" data-release-approve style="min-height:44px;flex:1 1 180px">Duyệt đăng Website</button><button type="button" data-release-revoke class="secondary" style="min-height:44px;flex:1 1 180px">Thu hồi công bố</button></div><p data-release-message class="muted" role="status"></p>';
 detail.append(panel);const statusNode=panel.querySelector('[data-release-status]'),lineage=panel.querySelector('[data-release-lineage]'),factsNode=panel.querySelector('[data-release-facts]'),mediaNode=panel.querySelector('[data-release-media]'),blockerList=panel.querySelector('[data-release-blockers]'),message=panel.querySelector('[data-release-message]'),approve=panel.querySelector('[data-release-approve]'),revoke=panel.querySelector('[data-release-revoke]');let current=null;
-const refresh=async()=>{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release',{credentials:'same-origin'});const data=await response.json();current=data;if(!response.ok){statusNode.textContent='Không tải được trạng thái công bố: '+(blockerLabels[data.error]||data.error||response.status);return}statusNode.textContent=stateLabels[data.state]||data.state;lineage.textContent='Gate A '+(data.gate_a_state||'UNKNOWN')+' · review '+id+' r'+data.review_revision+' · property '+(data.property_id||'—')+' · Core r'+data.property_revision;const f=data.canonical_facts||{};factsNode.textContent='Facts Core: '+[f.title,f.property_type,f.address,f.area,f.price,f.price_type,f.public_status,f.legal_status].map(x=>x==null?'—':String(x)).join(' · ');const m=data.media_summary||{};mediaNode.textContent='Media active: '+(m.active||0)+' · đủ quyền và asset public: '+(m.eligible||0)+' · bị chặn: '+(m.blocked||0);blockerList.replaceChildren(...(data.blockers||[]).map(code=>{const li=document.createElement('li');li.textContent=blockerLabels[code]||code;return li}));approve.disabled=!data.can_approve;revoke.disabled=!data.can_revoke};
-const act=async action=>{if(!current)return;let reason='';if(action==='revoke'){reason=window.prompt('Lý do thu hồi quyền preview?')||'';if(!reason.trim())return}const verb=action==='approve'?'duyệt tạo preview riêng':'thu hồi preview';if(!window.confirm('Xác nhận '+verb+' cho đúng property/revision đang hiển thị?'))return;approve.disabled=true;revoke.disabled=true;message.className='muted';message.textContent='Đang xử lý...';const nonce=window.crypto?.randomUUID?window.crypto.randomUUID():Date.now()+'-'+Math.random().toString(16).slice(2);try{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({property_id:current.property_id,expected_review_revision:current.review_revision,expected_property_revision:current.property_revision,idempotency_key:'admin-ui:'+action+':'+id+':'+nonce,reason})});const data=await response.json();if(!response.ok){const labels=(data.blockers||[]).map(code=>blockerLabels[code]||code);throw new Error(labels.join(' · ')||blockerLabels[data.error]||data.error||'HTTP '+response.status)}message.className='ok';message.textContent=action==='approve'?'Đã ghi nhận Owner release; preview đã cập nhật, chưa public.':'Đã thu hồi release; preview đã được gỡ.';await refresh()}catch(error){message.className='err';message.textContent=error.message;await refresh()}};
+const refresh=async()=>{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release',{credentials:'same-origin'});const data=await response.json();current=data;if(!response.ok){statusNode.textContent='Không tải được trạng thái công bố: '+(blockerLabels[data.error]||data.error||response.status);return}statusNode.textContent=data.state==='PUBLIC_ALLOWED'&&data.publication_mode==='STAGING_PUBLIC'?'Đang công khai trên Website staging':(stateLabels[data.state]||data.state);approve.textContent=data.publication_mode==='STAGING_PUBLIC'?'Duyệt đăng Website staging':'Duyệt preview private';revoke.textContent=data.publication_mode==='STAGING_PUBLIC'?'Gỡ khỏi Website staging':'Thu hồi preview';lineage.textContent='Gate A '+(data.gate_a_state||'UNKNOWN')+' · review '+id+' r'+data.review_revision+' · property '+(data.property_id||'—')+' · Core r'+data.property_revision;const f=data.canonical_facts||{};factsNode.textContent='Facts Core: '+[f.title,f.property_type,f.address,f.area,f.price,f.price_type,f.public_status,f.legal_status].map(x=>x==null?'—':String(x)).join(' · ');const m=data.media_summary||{};mediaNode.textContent='Media active: '+(m.active||0)+' · đủ quyền và asset public: '+(m.eligible||0)+' · bị chặn: '+(m.blocked||0);blockerList.replaceChildren(...(data.blockers||[]).map(code=>{const li=document.createElement('li');li.textContent=blockerLabels[code]||code;return li}));approve.disabled=!data.can_approve;revoke.disabled=!data.can_revoke};
+const act=async action=>{if(!current)return;let reason='';if(action==='revoke'){reason=window.prompt('Lý do thu hồi quyền công bố?')||'';if(!reason.trim())return}const isStaging=current.publication_mode==='STAGING_PUBLIC';const verb=action==='approve'?(isStaging?'đăng Website staging':'duyệt preview private'):(isStaging?'gỡ khỏi Website staging':'thu hồi preview');if(!window.confirm('Xác nhận '+verb+' cho đúng property/revision đang hiển thị?'))return;approve.disabled=true;revoke.disabled=true;message.className='muted';message.textContent='Đang xử lý...';const nonce=window.crypto?.randomUUID?window.crypto.randomUUID():Date.now()+'-'+Math.random().toString(16).slice(2);try{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({property_id:current.property_id,expected_review_revision:current.review_revision,expected_property_revision:current.property_revision,idempotency_key:'admin-ui:'+action+':'+id+':'+nonce,reason})});const data=await response.json();if(!response.ok){const labels=(data.blockers||[]).map(code=>blockerLabels[code]||code);throw new Error(labels.join(' · ')||blockerLabels[data.error]||data.error||'HTTP '+response.status)}message.className='ok';message.textContent=action==='approve'?(data.published?'Đã công khai trên Website staging. Production chưa thay đổi.':'Preview private đã cập nhật, chưa public.'):(isStaging?'Đã gỡ tin khỏi Website staging.':'Đã thu hồi preview.');await refresh()}catch(error){message.className='err';message.textContent=error.message;await refresh()}};
 approve.onclick=()=>act('approve');revoke.onclick=()=>act('revoke');await refresh()};
 })();
 </script>'''.encode('utf-8')
@@ -836,7 +852,7 @@ CONTENT_STUDIO_UI = '''<script>
     const panel = document.createElement('section');
     panel.className = 'item';
     panel.id = 'content-studio';
-    panel.innerHTML = '<h4>Content Studio · riêng tư</h4><p class="muted">Bản nháp offline theo Facts đã lưu; AI live chưa kết nối. Tạo Content không đăng Website.</p><button type="button" data-create style="min-height:44px">Tạo 3 bản nháp</button><div data-evidence><h5>Provenance và quyền nội dung</h5><input data-source placeholder="Source ID" aria-label="Source ID"><input data-claim placeholder="Claim được nguồn hỗ trợ" aria-label="Claim"><select data-rights aria-label="Rights"><option value="">Chọn rights</option><option>COMPANY</option><option>PERSONAL</option><option>APPROVED</option></select><button type="button" data-save-evidence style="min-height:44px">Lưu evidence</button></div><p data-message role="status"></p><div data-variants></div>';
+    panel.innerHTML = '<h4>Content Studio · riêng tư</h4><p class="muted">AI tạo đúng 3 mẫu theo Facts của revision đã duyệt Gate A. Mỗi lần tạo là một batch mới; bản nháp không được đăng Website.</p><button type="button" data-ai-create style="min-height:44px">Tạo 3 mẫu bằng AI · giới hạn tối đa 0,01 USD</button><button type="button" data-create class="secondary" style="min-height:44px">Tạo 3 mẫu offline</button><div data-evidence><h5>Provenance và quyền nội dung</h5><input data-source placeholder="Source ID" aria-label="Source ID"><input data-claim placeholder="Claim được nguồn hỗ trợ" aria-label="Claim"><select data-rights aria-label="Rights"><option value="">Chọn rights</option><option>COMPANY</option><option>PERSONAL</option><option>APPROVED</option></select><button type="button" data-save-evidence style="min-height:44px">Lưu evidence</button></div><p data-message role="status"></p><div data-variants></div>';
     host.append(panel);
     const message = panel.querySelector('[data-message]');
     const cards = panel.querySelector('[data-variants]');
@@ -851,6 +867,23 @@ CONTENT_STUDIO_UI = '''<script>
     panel.querySelector('[data-create]').onclick = async () => {
       try { await post('create'); await window.loadReview(id); }
       catch (error) { message.textContent = error.message; }
+    };
+    panel.querySelector('[data-ai-create]').onclick = async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      message.textContent = 'Đang tạo bản nháp riêng tư bằng AI…';
+      try {
+        const result = await post('create', {mode:'OPENAI_LIVE'});
+        await window.loadReview(id);
+        const status = document.querySelector('#content-studio [data-message]');
+        const generation = result.generation || {};
+        const usage = generation.usage || {};
+        if (status) status.textContent = `Đã tạo 3 mẫu riêng tư · ${generation.model || 'model không rõ'} · input ${usage.input_tokens ?? '—'} / output ${usage.output_tokens ?? '—'} tokens · request ${generation.request_id || '—'} · cost ${generation.estimated_cost_usd ?? 'chưa xác định'} USD · chưa đăng.`;
+      } catch (error) {
+        message.className = 'err';
+        message.textContent = error.message || 'Không tạo được Content bằng AI.';
+        button.disabled = false;
+      }
     };
     panel.querySelector('[data-save-evidence]').onclick = async () => {
       try {
@@ -868,6 +901,12 @@ CONTENT_STUDIO_UI = '''<script>
       } catch (error) { message.textContent = error.message; }
     };
     for (const batch of (pkg.content_batches || [])) {
+      const batchHeader = document.createElement('p');
+      batchHeader.className = 'muted';
+      const generation = batch.generation || {};
+      const usage = generation.usage || {};
+      batchHeader.textContent = `${batch.generation_mode || 'PRIVATE_DRAFT'} · ${batch.content_batch_id} · ${generation.model || ''} · input ${usage.input_tokens ?? '—'} / output ${usage.output_tokens ?? '—'} · request ${generation.request_id || '—'} · est. ${generation.estimated_cost_usd ?? '—'} USD`;
+      cards.append(batchHeader);
       for (const variant of (batch.variants || [])) {
         const card = document.createElement('article');
         card.className = 'item';
@@ -1272,6 +1311,41 @@ class Handler(BaseHTTPRequestHandler):
                 facts = dict((package.get("candidate") or {}).get("facts") or {})
                 if not facts:
                     raise ValueError("APPROVED_FACTS_REQUIRED")
+                if payload.get("mode") == "OPENAI_LIVE":
+                    if os.environ.get("BMT_ENV") != "staging" or not _CONTENT_LIVE_ENABLED:
+                        self.send_json({"error": "LIVE_CONTENT_DISABLED"}, 403); return
+                    if package.get("state") != "APPROVED" or not property_id or not property_revision:
+                        self.send_json({"error": "GATE_A_APPROVED_FACTS_REQUIRED"}, 409); return
+                    ai_run_id = "ai-run-" + uuid.uuid4().hex[:24]
+                    evidence = (package.get("evidence_revisions") or [])
+                    current_evidence = evidence[-1].get("evidence", {}) if evidence else {}
+                    ai_run = {"ai_run_id": ai_run_id, "facts_revision_id": f"facts-{property_id}-r{property_revision}",
+                              "review_id": review_id, "lineage": {"intake_id": (package.get("candidate") or {}).get("intake_id")}}
+                    result = build_generative_internal_draft(
+                        ai_run=ai_run, facts=facts,
+                        provenance_status="PASS" if current_evidence.get("citations") else "INSUFFICIENT_EVIDENCE",
+                        rights_status=current_evidence.get("rights_status"), provider=_AI_PROVIDER,
+                        model=_AI_PROVIDER.model, usage_sink=_USAGE_LEDGER)
+                    if result.get("status") != "PASS" or len(result.get("variants", [])) != 3:
+                        self.send_json({"error": "LIVE_CONTENT_GENERATION_FAILED", "reason_codes": result.get("reason_codes", [result.get("status", "BLOCKED")]), "generation": result.get("generation"), "published": False}, 422); return
+                    batch_id = result["content_batch_id"]
+                    batch = {"content_batch_id": batch_id, "generation_mode": "OPENAI_LIVE_PRIVATE_DRAFT",
+                             "status": "PRIVATE_DRAFT", "facts_revision_id": result["facts_revision_id"],
+                             "property_id": property_id, "property_revision": property_revision,
+                             "review_revision": int(package["review_revision"]), "generation": result.get("generation"),
+                             "variants": []}
+                    for source in result["variants"]:
+                        variant = dict(source)
+                        variant.update({"content_batch_id": batch_id, "content_revision": 1,
+                                        "facts_revision_id": result["facts_revision_id"], "property_id": property_id,
+                                        "property_revision": property_revision, "status": "DRAFT",
+                                        "visibility": "INTERNAL_ONLY"})
+                        batch["variants"].append(variant)
+                    package.setdefault("content_batches", []).append(batch)
+                    package["updated_at"] = now_iso(); center._persist(package)
+                    self.send_json({"status": batch["status"], "generation_mode": batch["generation_mode"],
+                                    "content_batch_id": batch_id, "facts_revision_id": batch["facts_revision_id"],
+                                    "generation": batch["generation"], "variants": batch["variants"], "published": False}, 201); return
                 ai_run_id = "ai-run-" + uuid.uuid4().hex[:24]
                 ai_run = {"ai_run_id": ai_run_id, "facts_revision_id": f"facts-{property_id or review_id}-r{property_revision or package['review_revision']}"}
                 result = build_copy_studio_preview(ai_run=ai_run, facts=facts, provenance_status="OFFLINE", rights_status="UNCONFIRMED", mode="INTERNAL_DRAFT")
@@ -1438,8 +1512,10 @@ class Handler(BaseHTTPRequestHandler):
                             rollback_ok = False
                         self.send_json({"error": "PUBLIC_RELEASE_PREVIEW_FAILED", "release_revoked": recorded and rollback_ok, "rollback": "PASS" if rollback_ok else "FAILED"}, 503)
                         return
+                    staging_public = os.environ.get("BMT_ENV") == "staging"
                     self.send_json({
-                        "status": "PREVIEW_READY", "published": False, "review_id": review_id,
+                        "status": "STAGING_PUBLISHED" if staging_public else "PREVIEW_READY",
+                        "environment": os.environ.get("BMT_ENV", "unknown"), "published": staging_public, "review_id": review_id,
                         "property_id": property_id, "review_revision": expected_review_revision,
                         "property_revision": expected_property_revision,
                         "decision_owner": owner_id,
@@ -1607,16 +1683,18 @@ class Handler(BaseHTTPRequestHandler):
             self.ai9_preview(path.rsplit("/", 1)[-1])
         elif path == "/api/search":
             q = parse_qs(urlparse(self.path).query).get("q", [""])[0].lower().strip()
-            try:
-                records = json.loads(PUBLIC_DATA.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                records = []
+            center = self.review_center_or_error()
+            if center is None:
+                return
+            records = center.store.list_properties()
             terms = [x for x in re.split(r"\s+", q) if x]
             result = []
             for item in records if isinstance(records, list) else []:
-                hay = json.dumps(item, ensure_ascii=False).lower()
+                hay = json.dumps({k: item.get(k) for k in ("property_id", "title", "address", "area", "property_type", "price", "lifecycle_state")}, ensure_ascii=False).lower()
                 if not terms or all(t in hay for t in terms):
-                    result.append({k: item.get(k) for k in ("id", "slug", "title", "source", "location", "addressText")})
+                    result.append({"property_id": item.get("property_id"), "property_revision": item.get("property_revision"),
+                                   "title": item.get("title"), "source": "Property Core", "location": item.get("area"),
+                                   "addressText": item.get("address"), "state": item.get("lifecycle_state")})
             self.send_json(result)
         else:
             self.send_error(404)

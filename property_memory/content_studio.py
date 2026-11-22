@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
+from .usage_ledger import official_pricing_catalog
 
 
 def _now() -> str:
@@ -95,47 +96,65 @@ def build_generative_internal_draft(*, ai_run: dict[str, Any], facts: dict[str, 
                "facts_revision_id": ai_run["facts_revision_id"], "facts": {k: v for k, v in facts.items() if v not in (None, "")},
                "provenance_status": provenance_status, "rights_status": rights_status or "UNKNOWN",
                "angles": list(ANGLES), "output_schema": "exactly_three_variants"}
+    seed = f"{ai_run.get('ai_run_id')}:{ai_run['facts_revision_id']}:{model}:{GENERATIVE_PROMPT_VERSION}"
+    receipt_id = _id("content-receipt", seed)
+    provider_name = getattr(provider, "provider_name", "injected")
+    generation = {"generation_id": ai_run.get("ai_run_id"), "provider": provider_name, "model": model,
+                  "request_id": None, "receipt_id": receipt_id, "usage": None,
+                  "usage_status": "USAGE_UNAVAILABLE", "cost_status": "USAGE_UNAVAILABLE",
+                  "cost_cap_usd": "0.01"}
+
+    def record_attempt(outcome: str, usage: dict[str, Any] | None, request_id: str | None) -> bool:
+        generation.update({"request_id": request_id, "usage": usage,
+                           "usage_status": "PROVIDER_RETURNED_USAGE" if usage is not None else "USAGE_UNAVAILABLE"})
+        if usage_sink is None:
+            generation["cost_status"] = "USAGE_SINK_UNAVAILABLE"
+            return False
+        try:
+            recorded = usage_sink.record(
+                receipt_id=receipt_id, intake_id=(ai_run.get("lineage") or {}).get("intake_id"),
+                review_id=ai_run.get("review_id"), ai_run_id=ai_run.get("ai_run_id"),
+                stage="content_generation", operation="copy_studio.generate", provider=provider_name,
+                model=model, outcome=outcome, usage=usage, provider_request_id=request_id,
+                idempotency_key=receipt_id, pricing=official_pricing_catalog().get(model))
+            generation["cost_status"] = recorded.get("status", "PRICE_NOT_VERIFIED")
+            generation["estimated_cost_usd"] = recorded.get("usd_cost")
+            return True
+        except Exception:
+            generation["cost_status"] = "USAGE_RECEIPT_WRITE_FAILED"
+            return False
+
+    def blocked(reason: str, usage: dict[str, Any] | None = None, request_id: str | None = None) -> dict[str, Any]:
+        record_attempt("FAILED", usage, request_id)
+        return {"status": "BLOCKED", "reason_codes": [reason], "mode": GENERATIVE_MODE,
+                "generation": generation, "mutated_property_store": False, "published": False, "variants": []}
+
     try:
         response = provider.generate(payload)
     except Exception as exc:
-        return {"status": "BLOCKED", "reason_codes": ["CONTENT_PROVIDER_ERROR", type(exc).__name__], "mode": GENERATIVE_MODE,
-                "mutated_property_store": False, "published": False, "variants": []}
+        return blocked("CONTENT_PROVIDER_ERROR_" + type(exc).__name__)
+    usage = response.get("usage") if isinstance(response, dict) and isinstance(response.get("usage"), dict) else None
+    request_id = response.get("provider_request_id") if isinstance(response, dict) and isinstance(response.get("provider_request_id"), str) else None
     variants = response.get("variants") if isinstance(response, dict) else None
     if not isinstance(variants, list) or len(variants) != 3 or {x.get("angle") for x in variants if isinstance(x, dict)} != set(ANGLES):
-        return {"status": "BLOCKED", "reason_codes": ["CONTENT_SCHEMA_INVALID"], "mode": GENERATIVE_MODE,
-                "mutated_property_store": False, "published": False, "variants": []}
+        return blocked("CONTENT_SCHEMA_INVALID", usage, request_id)
     bodies = [x.get("body") for x in variants]
     if any(not isinstance(x, str) or not x.strip() for x in bodies) or len(set(bodies)) != 3:
-        return {"status": "BLOCKED", "reason_codes": ["CONTENT_NOT_DISTINCT"], "mode": GENERATIVE_MODE,
-                "mutated_property_store": False, "published": False, "variants": []}
+        return blocked("CONTENT_NOT_DISTINCT", usage, request_id)
     allowed = {k for k, v in facts.items() if v not in (None, "")}
     for item in variants:
         if not isinstance(item.get("facts_used"), list) or not set(item["facts_used"]).issubset(allowed):
-            return {"status": "BLOCKED", "reason_codes": ["CONTENT_FACTS_UNGROUNDED"], "mode": GENERATIVE_MODE,
-                    "mutated_property_store": False, "published": False, "variants": []}
+            return blocked("CONTENT_FACTS_UNGROUNDED", usage, request_id)
         if not all(isinstance(item.get(k), list) for k in ("claims", "unknowns", "warnings")):
-            return {"status": "BLOCKED", "reason_codes": ["CONTENT_METADATA_INVALID"], "mode": GENERATIVE_MODE,
-                    "mutated_property_store": False, "published": False, "variants": []}
-    seed = f"{ai_run['ai_run_id']}:{ai_run['facts_revision_id']}:{model}:{GENERATIVE_PROMPT_VERSION}"
+            return blocked("CONTENT_METADATA_INVALID", usage, request_id)
+    if not record_attempt("SUCCEEDED", usage, request_id):
+        return {"status": "BLOCKED", "reason_codes": ["USAGE_RECEIPT_WRITE_FAILED"], "mode": GENERATIVE_MODE,
+                "generation": generation, "mutated_property_store": False, "published": False, "variants": []}
     out = []
     for index, item in enumerate(sorted(variants, key=lambda x: ANGLES.index(x["angle"])), 1):
         out.append({**item, "content_variant_id": _id("content-variant", f"{seed}:{index}"), "variant_index": index,
                     "status": "DRAFT", "visibility": "INTERNAL_ONLY", "model": model,
                     "prompt_version": GENERATIVE_PROMPT_VERSION})
-    usage = response.get("usage") if isinstance(response.get("usage"), dict) else None
-    request_id = response.get("provider_request_id") if isinstance(response.get("provider_request_id"), str) else None
-    generation = {
-        "generation_id": ai_run["ai_run_id"],
-        "provider": getattr(provider, "provider_name", "injected"),
-        "model": model,
-        "request_id": request_id,
-        "usage": usage,
-        "usage_status": "PROVIDER_RETURNED_USAGE" if usage is not None else "USAGE_UNAVAILABLE",
-        "cost_status": "ESTIMATE_ONLY",
-    }
-    if usage_sink is not None and usage is not None:
-        receipt = _id("content-receipt", seed)
-        usage_sink.record(receipt_id=receipt, intake_id=(ai_run.get("lineage") or {}).get("intake_id"), review_id=ai_run.get("review_id"), ai_run_id=ai_run.get("ai_run_id"), stage="content_generation", operation="copy_studio.generate", provider=getattr(provider, "provider_name", "injected"), model=model, outcome="SUCCEEDED", usage=usage, provider_request_id=request_id, idempotency_key=receipt)
     return {"status": "PASS", "mode": GENERATIVE_MODE, "ai_run_id": ai_run["ai_run_id"], "facts_revision_id": ai_run["facts_revision_id"],
             "content_batch_id": _id("content-batch", seed), "content_variant_ids": [x["content_variant_id"] for x in out],
             "variants": out, "generation_id": ai_run["ai_run_id"], "generation": generation, "lineage": {**(ai_run.get("lineage") or {}), "content_batch_id": _id("content-batch", seed), "content_variant_ids": [x["content_variant_id"] for x in out]},

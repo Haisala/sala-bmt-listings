@@ -39,19 +39,25 @@ EXTRACTION_RESPONSE_SCHEMA = {
 
 CONTENT_RESPONSE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "properties": {"variants": {"type": "array", "minItems": 5, "maxItems": 5, "items": {
+    "properties": {"variants": {"type": "array", "minItems": 3, "maxItems": 3, "items": {
         "type": "object", "additionalProperties": False,
         "properties": {
+            "angle": {"type": "string", "enum": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"]},
             "body": {"type": "string"}, "title": {"type": "string"},
             "facts_used": {"type": "array", "items": {"type": "string"}},
-            "citations_used": {"type": "array", "items": {"type": "string"}},
+            "claims": {"type": "array", "items": {"type": "string"}},
             "unknowns": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["body", "title", "facts_used", "citations_used", "unknowns", "warnings"],
+        "required": ["angle", "body", "title", "facts_used", "claims", "unknowns", "warnings"],
     }}},
     "required": ["variants"],
 }
+
+MAX_CONTENT_REQUEST_BYTES = 8000
+MAX_CONTENT_INPUT_TOKENS = 1200
+MAX_CONTENT_OUTPUT_TOKENS = 900
+MAX_CONTENT_COST_USD = 0.01
 
 class ProviderError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False, diagnostics: dict[str, Any] | None = None):
@@ -96,17 +102,34 @@ def build_request(intake: dict[str, Any], model: str) -> dict[str, Any]:
     return {"model": model, "instructions": extraction_instructions(), "input": "Return JSON only.\n" + json.dumps(allowed, ensure_ascii=False), "text": {"format": {"type": "json_schema", "name": "property_extraction", "strict": True, "schema": EXTRACTION_RESPONSE_SCHEMA}}}
 
 
-def build_content_request(payload: dict[str, Any], model: str, *, max_output_tokens: int = 900) -> dict[str, Any]:
-    """Build the single Content request from approved facts and references only."""
-    allowed = {"generation_id": payload.get("generation_id"), "facts": payload.get("facts") or {},
-               "provenance": payload.get("provenance") or {}, "rights_status": payload.get("rights_status"),
-               "media": payload.get("media") or [], "output_count": 5}
-    instructions = ("Generate exactly five distinct private real-estate content variants from the supplied approved facts. "
-                    "Use only facts and citations supplied; list unknowns and warnings; do not invent legal or rights claims. "
-                    "Return JSON only.")
-    return {"model": model, "instructions": instructions, "input": json.dumps(allowed, ensure_ascii=False),
-            "max_output_tokens": max_output_tokens,
-            "text": {"format": {"type": "json_schema", "name": "content_studio_five", "strict": True, "schema": CONTENT_RESPONSE_SCHEMA}}}
+def _content_cost_upper_bound(request_bytes: int, max_output_tokens: int) -> float:
+    # Request UTF-8 bytes conservatively bound text input tokens. Rates are doubled
+    # from current standard gpt-6-luna pricing to leave room for price/tier variance.
+    return (request_bytes * 0.20 + max_output_tokens * 1.00) / 1_000_000
+
+
+def build_content_request(payload: dict[str, Any], model: str, *, max_output_tokens: int = MAX_CONTENT_OUTPUT_TOKENS) -> dict[str, Any]:
+    """Build one bounded three-variant request from revision-bound approved facts."""
+    if model != DEFAULT_EXTRACTION_MODEL or max_output_tokens != MAX_CONTENT_OUTPUT_TOKENS:
+        raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
+    allowed = {"generation_id": payload.get("generation_id"), "facts_revision_id": payload.get("facts_revision_id"),
+               "facts": payload.get("facts") or {}, "angles": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"],
+               "output_count": 3}
+    instructions = ("Write exactly 3 distinct private Vietnamese property variants, one per angle. "
+                    "Use only supplied facts; facts_used must be exact keys from facts. "
+                    "Do not invent legality, ownership, amenities, returns, or media rights. List claims, unknowns, warnings. JSON only.")
+    request = {"model": model, "instructions": instructions, "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
+               "max_output_tokens": max_output_tokens,
+               "text": {"format": {"type": "json_schema", "name": "content_studio_three", "strict": True, "schema": CONTENT_RESPONSE_SCHEMA}}}
+    request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    input_token_upper_bound = (len(instructions.encode("utf-8")) + len(request["input"].encode("utf-8"))
+                               + schema_bytes + len("content_studio_three"))
+    if request_bytes > MAX_CONTENT_REQUEST_BYTES or input_token_upper_bound > MAX_CONTENT_INPUT_TOKENS:
+        raise ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")
+    if _content_cost_upper_bound(request_bytes, max_output_tokens) >= MAX_CONTENT_COST_USD:
+        raise ValueError("CONTENT_COST_CAP_EXCEEDED")
+    return request
 
 def _response_json(response: dict[str, Any]) -> dict[str, Any]:
     if isinstance(response.get("output_json"), dict): return response["output_json"]
@@ -168,8 +191,8 @@ class OpenAIPropertyProvider:
             exc.diagnostics.setdefault("model", self.model)
             raise
         value = _response_json(response)
-        if not isinstance(value.get("variants"), list) or len(value["variants"]) != 5:
-            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly five variants")
+        if not isinstance(value.get("variants"), list) or len(value["variants"]) != 3:
+            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly three variants")
         value["usage"] = response.get("usage") if isinstance(response.get("usage"), dict) else None
         value["provider_request_id"] = response.get("id") if isinstance(response.get("id"), str) else None
         value["metadata"] = {"provider": self.provider_name, "model": self.model, "prompt_version": CONTENT_PROMPT_VERSION}
