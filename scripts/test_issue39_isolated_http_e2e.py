@@ -138,6 +138,7 @@ def child_env(root: Path, mode: str, port: int = 0, *, customer_port: int = 0, a
             "BMT_ADMIN_LOCAL_HTTP_DEV": "1",
             "BMT_ADMIN_SECURE_COOKIE": "0",
             "BMT_ENV": "test",
+            "BMT_TEST_ONLY": "1",
             "BMT_OPENAI_EXTRACTION": "0",
             "BMT_OPENAI_CONTENT_LIVE": "0",
             "BMT_ANALYTICS_ALLOWED_ORIGINS": f"http://127.0.0.1:{customer_port}" if customer_port else "",
@@ -381,6 +382,30 @@ def run_e2e() -> None:
         property_id = gate["mutation_result"]["property_id"]
         check(request(customer_origin + "/api/listings")[0] == 503, "gate_a_without_web_publish_customer_fail_closed", evidence, "HTTP 503")
 
+        status, _, content = json_call(admin_origin + f"/api/reviews/{review_id}/content/create", method="POST", obj={}, headers=admin_headers)
+        check(status == 201 and content.get("generation_mode") == "OFFLINE_RULE_BASED" and len(content.get("variants", [])) == 3 and content.get("published") is False,
+              "owner_content_create_three_private_drafts", evidence, f"HTTP {status}")
+        variant = content["variants"][0]
+        status, _, edited = json_call(admin_origin + f"/api/reviews/{review_id}/content/edit", method="POST",
+                                      obj={"content_variant_id": variant["content_variant_id"], "expected_content_revision": 1,
+                                           "title": "TEST_ONLY Owner selected title", "body": "TEST_ONLY Owner edited body."}, headers=admin_headers)
+        check(status == 200 and edited.get("content_revision") == 2 and edited.get("published") is False,
+              "owner_content_edit_revision", evidence, f"HTTP {status}")
+        content_variant_id = variant["content_variant_id"]
+        status, _, selected = json_call(admin_origin + f"/api/reviews/{review_id}/content/select", method="POST",
+                                        obj={"content_variant_id": content_variant_id, "expected_content_revision": 2}, headers=admin_headers)
+        check(status == 200 and selected.get("status") == "DRAFT", "owner_content_select_is_not_approval", evidence, f"HTTP {status}")
+        status, _, missing_evidence = json_call(admin_origin + f"/api/reviews/{review_id}/content/approve", method="POST",
+                                               obj={"content_variant_id": content_variant_id, "expected_content_revision": 2}, headers=admin_headers)
+        check(status == 422 and missing_evidence.get("error") == "RIGHTS_NOT_APPROVED", "gate_b_missing_evidence_fail_closed", evidence, f"HTTP {status}")
+        status, _, evidence_saved = json_call(admin_origin + f"/api/reviews/{review_id}/evidence", method="POST",
+                                              obj={"citations": [{"source_id": "TEST_ONLY-source-1", "claim": "TEST_ONLY Owner confirms source", "rights_status": "APPROVED"}], "rights_status": "APPROVED"}, headers=admin_headers)
+        check(status == 201, "owner_content_evidence_saved_test_only", evidence, f"HTTP {status} {evidence_saved.get('error', '')}")
+        status, _, content_approved = json_call(admin_origin + f"/api/reviews/{review_id}/content/approve", method="POST",
+                                                obj={"content_variant_id": content_variant_id, "expected_content_revision": 2}, headers=admin_headers)
+        check(status == 200 and content_approved.get("status") == "OWNER_APPROVED" and content_approved.get("published") is False,
+              "owner_gate_b_content_approval", evidence, f"HTTP {status}")
+
         from property_memory import PropertyStore
         store = PropertyStore(root / "admin-private" / "property-core.sqlite3")
         appearances = store.list_source_appearances(property_id)
@@ -415,6 +440,10 @@ def run_e2e() -> None:
         rows = json.loads(artifact_bytes)
         check(len(rows) == 1 and rows[0]["propertyId"] == property_id and rows[0]["propertyRevision"] == 1,
               "admin_projection_artifact_lineage", evidence)
+        check(rows[0].get("contentVariantId") == content_variant_id and rows[0].get("contentRevision") == 2
+              and rows[0].get("title") == "TEST_ONLY Owner selected title"
+              and rows[0].get("description") == "TEST_ONLY Owner edited body.",
+              "approved_content_bound_to_projection", evidence)
         check(store.get(property_id) == core_before_publication and len(store.list_properties()) == count_before_publication,
               "property_core_unchanged_by_web_publication", evidence)
 
@@ -427,6 +456,8 @@ def run_e2e() -> None:
         listing = feed["items"][0]
         check(listing["property_id"] == property_id and listing["property_revision"] == 1 and listing["projection_id"] == rows[0]["projectionId"],
               "feed_identity_and_revision_linkage", evidence)
+        check(listing.get("content_variant_id") == content_variant_id and listing.get("title") == "TEST_ONLY Owner selected title"
+              and listing.get("description") == "TEST_ONLY Owner edited body.", "customer_reads_approved_content", evidence)
         publication_id = listing["publication_id"]
         check(publication_id == rows[0]["publicationId"], "feed_publication_id_linkage", evidence)
         status, _, detail_raw = request(customer_origin + "/api/listings/" + listing["listing_id"])

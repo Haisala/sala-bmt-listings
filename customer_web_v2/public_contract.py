@@ -7,7 +7,7 @@ from typing import Any
 REQUIRED = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
 STATUSES = {"Đang bán", "Đang cho thuê", "Đã cho thuê", "Đã cọc", "Đã bán"}
 PRIVATE_KEYS = {"internal_analysis", "candidate", "source_bundle", "owner_contact", "credentials", "private_media_path", "rights_evidence"}
-ALLOWED_FIELDS = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "category", "propertyType", "addressText", "areas", "transactionType", "priceLabel", "priceNote", "priceUnit", "area", "dimensions", "width", "length", "landArea", "legal", "road", "description", "videos", "reelUrl", "createdAt", "locationNotes", "featured", "goodPrice", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
+ALLOWED_FIELDS = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "category", "propertyType", "addressText", "areas", "transactionType", "priceLabel", "priceNote", "priceUnit", "area", "dimensions", "width", "length", "landArea", "legal", "road", "description", "videos", "reelUrl", "createdAt", "locationNotes", "featured", "goodPrice", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights", "contentBatchId", "contentVariantId", "contentRevision"}
 
 
 class PublicContractError(ValueError):
@@ -39,6 +39,9 @@ def validate_public_dto(dto: dict[str, Any]) -> dict[str, Any]:
         raise PublicContractError("INVALID_STATUS")
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", str(dto["slug"])):
         raise PublicContractError("INVALID_SLUG")
+    content_keys = {"contentBatchId", "contentVariantId", "contentRevision"}
+    if content_keys.intersection(dto) and (not content_keys.issubset(dto) or not all(isinstance(dto[key], str) and dto[key] for key in ("contentBatchId", "contentVariantId")) or int(dto["contentRevision"]) < 1):
+        raise PublicContractError("PUBLIC_CONTENT_LINEAGE_INVALID")
     if not isinstance(dto["price"], (int, float)) or isinstance(dto["price"], bool) or dto["price"] <= 0:
         raise PublicContractError("INVALID_PRICE")
     leaked = sorted(PRIVATE_KEYS.intersection(dto))

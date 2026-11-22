@@ -26,7 +26,7 @@ PUBLIC_FIELDS = frozenset({
     "legal", "road", "features", "description", "images", "videos", "reelUrl",
     "createdAt", "updatedAt", "areas", "locationNotes", "featured", "goodPrice",
     "transactionType", "priceUnit", "sourceSystem", "publicationStatus",
-    "publicationRevision", "publicationApprovedAt", "mediaRights",
+    "publicationRevision", "publicationApprovedAt", "mediaRights", "contentBatchId", "contentVariantId", "contentRevision",
 })
 
 
@@ -137,7 +137,7 @@ def _public_media(store: PropertyStore, property_id: str, public_slug: str | Non
     return media
 
 
-def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any]) -> dict[str, Any]:
+def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any], public_content: dict[str, Any] | None = None) -> dict[str, Any]:
     revision = int(prop.get("property_revision") or 0)
     if revision < 1:
         raise ProjectionError("PROPERTY_REVISION_REQUIRED")
@@ -150,8 +150,9 @@ def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any]) ->
     projection_id = "projection-" + hashlib.sha256(seed).hexdigest()[:24]
     generated_at = prop.get("updated_at")
     attributes = prop.get("attributes") if isinstance(prop.get("attributes"), dict) else {}
-    title = prop.get("title") or prop["property_id"]
-    public_slug = attributes.get("public_slug") or _slug(str(title))
+    canonical_title = prop.get("title") or prop["property_id"]
+    title = (public_content or {}).get("title") or canonical_title
+    public_slug = attributes.get("public_slug") or _slug(str(canonical_title))
     price_type = attributes.get("price_type")
     is_rent = price_type == "RENT"
     default_status = "Đang cho thuê" if is_rent else "Đang bán"
@@ -176,16 +177,20 @@ def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any]) ->
         "area": prop.get("area"), "dimensions": f"{prop.get('width')}×{prop.get('length')}m" if prop.get("width") and prop.get("length") else None,
         "width": prop.get("width"), "length": prop.get("length"), "landArea": prop.get("land_area"),
         "legal": prop.get("legal_status"), "road": prop.get("road_access"), "features": features,
-        "description": prop.get("factual_description") or title, "images": media, "videos": [], "reelUrl": None,
+        "description": (public_content or {}).get("body") or prop.get("factual_description") or title, "images": media, "videos": [], "reelUrl": None,
         "createdAt": prop.get("created_at"), "updatedAt": generated_at, "areas": [prop.get("area")] if prop.get("area") else [],
         "locationNotes": [], "featured": False, "goodPrice": False,
     }
+    if public_content:
+        dto.update({"contentBatchId": public_content["content_batch_id"],
+                    "contentVariantId": public_content["content_variant_id"],
+                    "contentRevision": int(public_content["content_revision"])})
     if set(dto) - PUBLIC_FIELDS:
         raise ProjectionError("PUBLIC_ALLOWLIST_VIOLATION")
     return dto
 
 
-def build_public_projection(store: PropertyStore, property_id: str, output_path: str | Path, *, failure: Callable[[str], None] | None = None) -> dict[str, Any]:
+def build_public_projection(store: PropertyStore, property_id: str, output_path: str | Path, *, public_content: dict[str, Any] | None = None, failure: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Atomically upsert one approved property into an isolated public fixture."""
     destination = Path(output_path).resolve()
     if destination == (PROJECT_ROOT / "data" / "listings.json").resolve():
@@ -194,7 +199,13 @@ def build_public_projection(store: PropertyStore, property_id: str, output_path:
     if prop is None:
         raise ProjectionError("PROPERTY_NOT_FOUND")
     release = _approval_evidence(store, property_id, int(prop.get("property_revision") or 0))
-    dto = _dto(store, prop, release)
+    if public_content and (public_content.get("status") != "OWNER_APPROVED" or public_content.get("property_id") != property_id
+            or int(public_content.get("property_revision") or 0) != int(prop.get("property_revision") or 0)
+            or not all(isinstance(public_content.get(key), str) and public_content[key].strip() for key in ("content_batch_id", "content_variant_id", "facts_revision_id", "title", "body"))
+            or int(public_content.get("content_revision") or 0) < 1
+            or public_content.get("facts_revision_id") != f"facts-{property_id}-r{int(prop.get('property_revision') or 0)}"):
+        raise ProjectionError("APPROVED_CONTENT_STALE_OR_INVALID")
+    dto = _dto(store, prop, release, public_content)
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     existing: list[Any] = []
     if destination.exists():

@@ -135,6 +135,8 @@ class PublicProjectionReader:
             "publication_approved_at": dto["publicationApprovedAt"],
             "status": "APPROVED", "transaction_type": "RENT" if transaction == "RENTAL" else "SALE",
             "title": dto["title"], "description": str(dto.get("description") or dto["title"]),
+            "content_batch_id": dto.get("contentBatchId"), "content_variant_id": dto.get("contentVariantId"),
+            "content_revision": dto.get("contentRevision"),
             "price_vnd": int(price), "area_m2": area, "property_type": dto["propertyType"],
             "location": dto["addressText"], "media": media,
         }

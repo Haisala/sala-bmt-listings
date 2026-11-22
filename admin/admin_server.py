@@ -39,7 +39,7 @@ from property_memory.ai_gateway import AIGateway
 from property_memory.review_center import ReviewCenter, public_release_id
 from property_memory.projection_builder import ProjectionError, _is_public_asset_ref, _media_rights_allowed, _slug, build_public_projection
 from property_memory.staging_artifact_writer import StagingArtifactError, withdraw_staging_web_record, write_staging_web_artifact
-from property_memory.ai9_layers import OWNER_CONFIRMED_TEST_COMMENT, OWNER_CONFIRMED_TEST_REVIEW, run_ai9_preview
+from property_memory.ai9_layers import OWNER_CONFIRMED_TEST_COMMENT, OWNER_CONFIRMED_TEST_REVIEW, run_ai9_preview, run_gate_b, approve_gate_b
 from property_memory.content_studio import build_copy_studio_preview, build_generative_internal_draft, build_generative_content_batch, GENERATIVE_MODE
 from property_memory.evidence import validate_evidence_payload
 from property_memory.runtime_config import diagnostic_payload, health_payload, load_runtime_config
@@ -445,12 +445,17 @@ def _public_release_snapshot(center: ReviewCenter, review_id: str, *, cleanup_st
     if (package.get("state") != "APPROVED" or gate_a.get("type") != "APPROVE"
             or int(gate_a.get("revision", -1)) != int(package.get("review_revision", -2)) or not property_id):
         blockers.append("GATE_A_APPROVAL_REQUIRED")
+    content = package.get("selected_content") or {}
     prop = center.store.get(property_id) if property_id else None
     if prop is None:
         blockers.append("PROPERTY_NOT_FOUND")
         property_revision = 0
     else:
         property_revision = int(prop.get("property_revision") or 0)
+        if (content.get("status") != "OWNER_APPROVED" or content.get("property_id") != property_id
+                or int(content.get("property_revision") or 0) != property_revision
+                or content.get("facts_revision_id") != f"facts-{property_id}-r{property_revision}"):
+            blockers.append("APPROVED_CONTENT_REQUIRED")
         if property_revision < 1:
             blockers.append("PROPERTY_REVISION_REQUIRED")
         required = ("title", "property_type", "address", "price")
@@ -511,7 +516,7 @@ def _public_release_snapshot(center: ReviewCenter, review_id: str, *, cleanup_st
     else:
         state = "PUBLIC_ALLOWED" if belongs_to_review else "PUBLIC_ALLOWED_OTHER_REVIEW"
     active = bool(latest_release and latest_release.get("action") == "APPROVE_PUBLICATION")
-    if active and blockers and "PUBLIC_RELEASE_ACTIVE_OTHER_REVIEW" not in blockers:
+    if active and blockers and state != "STALE" and "PUBLIC_RELEASE_ACTIVE_OTHER_REVIEW" not in blockers:
         state = "INELIGIBLE"
 
     preview_removed = 0
@@ -531,6 +536,7 @@ def _public_release_snapshot(center: ReviewCenter, review_id: str, *, cleanup_st
         "gate_a_state": package.get("state"), "property_id": property_id or None,
         "property_revision": property_revision, "state": state,
         "canonical_facts": canonical_facts, "media_summary": media_summary,
+        "selected_content": {k: content.get(k) for k in ("content_batch_id", "content_variant_id", "content_revision", "title") if content.get(k)},
         "release_action": latest_release.get("action") if belongs_to_review and latest_release else None,
         "release_owner_id": latest_release.get("owner_id") if belongs_to_review and latest_release else None,
         "publication_id": (latest_release.get("publication_id") or public_release_id(latest_release)) if belongs_to_review and own_active else None,
@@ -814,6 +820,77 @@ detail.append(panel);const statusNode=panel.querySelector('[data-release-status]
 const refresh=async()=>{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release',{credentials:'same-origin'});const data=await response.json();current=data;if(!response.ok){statusNode.textContent='Không tải được trạng thái công bố: '+(blockerLabels[data.error]||data.error||response.status);return}statusNode.textContent=stateLabels[data.state]||data.state;lineage.textContent='Gate A '+(data.gate_a_state||'UNKNOWN')+' · review '+id+' r'+data.review_revision+' · property '+(data.property_id||'—')+' · Core r'+data.property_revision;const f=data.canonical_facts||{};factsNode.textContent='Facts Core: '+[f.title,f.property_type,f.address,f.area,f.price,f.price_type,f.public_status,f.legal_status].map(x=>x==null?'—':String(x)).join(' · ');const m=data.media_summary||{};mediaNode.textContent='Media active: '+(m.active||0)+' · đủ quyền và asset public: '+(m.eligible||0)+' · bị chặn: '+(m.blocked||0);blockerList.replaceChildren(...(data.blockers||[]).map(code=>{const li=document.createElement('li');li.textContent=blockerLabels[code]||code;return li}));approve.disabled=!data.can_approve;revoke.disabled=!data.can_revoke};
 const act=async action=>{if(!current)return;let reason='';if(action==='revoke'){reason=window.prompt('Lý do thu hồi quyền preview?')||'';if(!reason.trim())return}const verb=action==='approve'?'duyệt tạo preview riêng':'thu hồi preview';if(!window.confirm('Xác nhận '+verb+' cho đúng property/revision đang hiển thị?'))return;approve.disabled=true;revoke.disabled=true;message.className='muted';message.textContent='Đang xử lý...';const nonce=window.crypto?.randomUUID?window.crypto.randomUUID():Date.now()+'-'+Math.random().toString(16).slice(2);try{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({property_id:current.property_id,expected_review_revision:current.review_revision,expected_property_revision:current.property_revision,idempotency_key:'admin-ui:'+action+':'+id+':'+nonce,reason})});const data=await response.json();if(!response.ok){const labels=(data.blockers||[]).map(code=>blockerLabels[code]||code);throw new Error(labels.join(' · ')||blockerLabels[data.error]||data.error||'HTTP '+response.status)}message.className='ok';message.textContent=action==='approve'?'Đã ghi nhận Owner release; preview đã cập nhật, chưa public.':'Đã thu hồi release; preview đã được gỡ.';await refresh()}catch(error){message.className='err';message.textContent=error.message;await refresh()}};
 approve.onclick=()=>act('approve');revoke.onclick=()=>act('revoke');await refresh()};
+})();
+</script>'''.encode('utf-8')
+
+CONTENT_STUDIO_UI = '''<script>
+(()=> {
+  const priorLoadReview = window.loadReview;
+  window.loadReview = async function(id) {
+    await priorLoadReview(id);
+    const host = document.querySelector('#review-detail');
+    if (!host) return;
+    const response = await fetch('/api/reviews/' + encodeURIComponent(id), {credentials:'same-origin'});
+    const pkg = await response.json();
+    if (!response.ok) return;
+    const panel = document.createElement('section');
+    panel.className = 'item';
+    panel.id = 'content-studio';
+    panel.innerHTML = '<h4>Content Studio · riêng tư</h4><p class="muted">Bản nháp offline theo Facts đã lưu; AI live chưa kết nối. Tạo Content không đăng Website.</p><button type="button" data-create style="min-height:44px">Tạo 3 bản nháp</button><div data-evidence><h5>Provenance và quyền nội dung</h5><input data-source placeholder="Source ID" aria-label="Source ID"><input data-claim placeholder="Claim được nguồn hỗ trợ" aria-label="Claim"><select data-rights aria-label="Rights"><option value="">Chọn rights</option><option>COMPANY</option><option>PERSONAL</option><option>APPROVED</option></select><button type="button" data-save-evidence style="min-height:44px">Lưu evidence</button></div><p data-message role="status"></p><div data-variants></div>';
+    host.append(panel);
+    const message = panel.querySelector('[data-message]');
+    const cards = panel.querySelector('[data-variants]');
+    const post = async (action, data = {}) => {
+      const result = await fetch('/api/reviews/' + encodeURIComponent(id) + '/content/' + action, {
+        method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+      });
+      const value = await result.json();
+      if (!result.ok) throw Error(value.error || 'HTTP ' + result.status);
+      return value;
+    };
+    panel.querySelector('[data-create]').onclick = async () => {
+      try { await post('create'); await window.loadReview(id); }
+      catch (error) { message.textContent = error.message; }
+    };
+    panel.querySelector('[data-save-evidence]').onclick = async () => {
+      try {
+        const source_id = panel.querySelector('[data-source]').value.trim();
+        const claim = panel.querySelector('[data-claim]').value.trim();
+        const rights_status = panel.querySelector('[data-rights]').value;
+        if (!source_id || !claim || !rights_status) throw Error('Cần nhập nguồn, claim và rights.');
+        const result = await fetch('/api/reviews/' + encodeURIComponent(id) + '/evidence', {
+          method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({citations:[{source_id, claim, rights_status}], rights_status})
+        });
+        const value = await result.json();
+        if (!result.ok) throw Error(value.error || 'Evidence bị chặn');
+        message.textContent = 'Evidence đã lưu ' + value.evidence_revision_id;
+      } catch (error) { message.textContent = error.message; }
+    };
+    for (const batch of (pkg.content_batches || [])) {
+      for (const variant of (batch.variants || [])) {
+        const card = document.createElement('article');
+        card.className = 'item';
+        card.innerHTML = '<b></b><label>Tiêu đề</label><input data-title><label>Nội dung</label><textarea data-body rows="5"></textarea><button type="button" data-edit style="min-height:44px">Lưu chỉnh sửa</button><button type="button" data-select style="min-height:44px">Chọn mẫu</button><button type="button" data-approve style="min-height:44px">Duyệt Content (Gate B)</button>';
+        card.querySelector('b').textContent = (variant.status || 'DRAFT') + ' · ' + variant.content_variant_id + ' · revision ' + variant.content_revision;
+        card.querySelector('[data-title]').value = variant.title || '';
+        card.querySelector('[data-body]').value = variant.body || '';
+        const payload = () => ({content_variant_id:variant.content_variant_id, expected_content_revision:variant.content_revision});
+        const actions = [
+          ['[data-edit]', 'edit', () => ({title:card.querySelector('[data-title]').value, body:card.querySelector('[data-body]').value})],
+          ['[data-select]', 'select', () => ({})],
+          ['[data-approve]', 'approve', () => ({})]
+        ];
+        for (const [selector, action, extra] of actions) {
+          card.querySelector(selector).onclick = async () => {
+            try { await post(action, {...payload(), ...extra()}); await window.loadReview(id); }
+            catch (error) { message.textContent = error.message; }
+          };
+        }
+        cards.append(card);
+      }
+    }
+  };
 })();
 </script>'''.encode('utf-8')
 
@@ -1143,7 +1220,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"content_route": f"/api/copy-studio/generate/{ai_run_id}", **(existing or result)}, 201)
 
     def evidence_route(self, review_id: str, *, payload: dict[str, Any] | None = None) -> None:
-        if os.environ.get("BMT_ENV") != "staging":
+        test_root = Path(os.environ.get("SALA_E2E_ROOT", "")).resolve()
+        test_only = (os.environ.get("BMT_ENV") == "test" and os.environ.get("BMT_TEST_ONLY") == "1"
+                     and _is_loopback_host(HOST) and bool(os.environ.get("SALA_E2E_ROOT"))
+                     and Path(PRIVATE_ROOT).resolve().is_relative_to(test_root))
+        if os.environ.get("BMT_ENV") != "staging" and not test_only:
             self.send_json({"error": "WRONG_ENVIRONMENT"}, 403)
             return
         center = self.review_center_or_error()
@@ -1170,6 +1251,92 @@ class Handler(BaseHTTPRequestHandler):
         center._persist(package)
         append_audit("review_evidence_create", review_id, "succeeded", None, 1, operation_id=f"op-{revision_id}", idempotency_key=revision_id)
         self.send_json({"status": "PASS", "review_id": review_id, "evidence_revision_id": revision_id, "intake_id": entry["intake_id"], "citations_count": len(evidence["citations"]), "rights_status": evidence["rights_status"]}, 201)
+
+    def content_route_post(self, review_id: str, action: str, payload: dict[str, Any]) -> None:
+        center = self.review_center_or_error()
+        if center is None:
+            return
+        owner_id = self.owner_id()
+        if not owner_id or owner_id != (os.environ.get("BMT_ADMIN_OWNER_ID", "owner").strip() or "owner"):
+            self.send_json({"error": "OWNER_CONTENT_APPROVAL_REQUIRED"}, 403)
+            return
+        package = center.packages.get(review_id)
+        if package is None:
+            self.send_json({"error": "REVIEW_NOT_FOUND"}, 404)
+            return
+        try:
+            property_id = str((package.get("mutation_result") or {}).get("property_id") or "")
+            prop = center.store.get(property_id) if property_id else None
+            property_revision = int((prop or {}).get("property_revision") or 0)
+            if action == "create":
+                facts = dict((package.get("candidate") or {}).get("facts") or {})
+                if not facts:
+                    raise ValueError("APPROVED_FACTS_REQUIRED")
+                ai_run_id = "ai-run-" + uuid.uuid4().hex[:24]
+                ai_run = {"ai_run_id": ai_run_id, "facts_revision_id": f"facts-{property_id or review_id}-r{property_revision or package['review_revision']}"}
+                result = build_copy_studio_preview(ai_run=ai_run, facts=facts, provenance_status="OFFLINE", rights_status="UNCONFIRMED", mode="INTERNAL_DRAFT")
+                if result.get("status") != "PASS" or len(result.get("variants", [])) != 3:
+                    raise ValueError("OFFLINE_CONTENT_GENERATION_FAILED")
+                batch_id = "content-batch-" + uuid.uuid4().hex[:24]
+                batch = {"content_batch_id": batch_id, "generation_mode": "OFFLINE_RULE_BASED", "status": "PRIVATE_DRAFT", "facts_revision_id": ai_run["facts_revision_id"], "property_id": property_id or None, "property_revision": property_revision or None, "review_revision": int(package["review_revision"]), "variants": []}
+                for source in result["variants"]:
+                    variant = dict(source)
+                    variant.update({"content_batch_id": batch_id, "content_revision": 1, "facts_revision_id": ai_run["facts_revision_id"], "property_id": property_id or None, "property_revision": property_revision or None, "status": "DRAFT", "visibility": "INTERNAL_ONLY"})
+                    batch["variants"].append(variant)
+                package.setdefault("content_batches", []).append(batch)
+                package["updated_at"] = now_iso(); center._persist(package)
+                self.send_json({"status": batch["status"], "generation_mode": batch["generation_mode"], "content_batch_id": batch_id, "facts_revision_id": batch["facts_revision_id"], "variants": batch["variants"], "published": False}, 201); return
+            if action in {"edit", "select", "approve"}:
+                variant_id = str(payload.get("content_variant_id") or "")
+                batch = next((b for b in package.get("content_batches", []) if any(v.get("content_variant_id") == variant_id for v in b.get("variants", []))), None)
+                variant = next((v for v in batch.get("variants", []) if v.get("content_variant_id") == variant_id), None) if batch else None
+                if variant is None:
+                    self.send_json({"error": "CONTENT_VARIANT_NOT_FOUND"}, 404); return
+                if int(payload.get("expected_content_revision", -1)) != int(variant.get("content_revision", 0)):
+                    self.send_json({"error": "STALE_CONTENT_REVISION"}, 409); return
+                if action == "edit":
+                    latest = _latest_public_release(center, property_id)[1] if property_id else None
+                    if latest and latest.get("action") == "APPROVE_PUBLICATION":
+                        raise ValueError("REVOKE_PUBLICATION_BEFORE_CONTENT_EDIT")
+                    title, body = payload.get("title"), payload.get("body")
+                    if not isinstance(title, str) or not title.strip() or len(title) > 180 or not isinstance(body, str) or not body.strip() or len(body) > 6000:
+                        raise ValueError("CONTENT_FIELDS_INVALID")
+                    variant.update({"title": title.strip(), "body": body.strip(), "content_revision": int(variant["content_revision"]) + 1, "status": "DRAFT", "edited_by": owner_id, "edited_at": now_iso()})
+                    package.pop("selected_content", None)
+                elif action == "select":
+                    if package.get("state") != "APPROVED" or not property_id or not property_revision:
+                        raise ValueError("GATE_A_PROPERTY_REQUIRED")
+                    if int(batch.get("review_revision", -1)) != int(package.get("review_revision", -2)):
+                        raise ValueError("CONTENT_FACTS_REVISION_STALE")
+                    facts_revision_id = f"facts-{property_id}-r{property_revision}"
+                    batch.update({"property_id": property_id, "property_revision": property_revision, "facts_revision_id": facts_revision_id})
+                    for item in batch["variants"]:
+                        item.update({"property_id": property_id, "property_revision": property_revision, "facts_revision_id": facts_revision_id})
+                    variant["selected"] = True
+                    package["selected_content_variant_id"] = variant_id
+                    package.pop("selected_content", None)
+                else:
+                    if package.get("state") != "APPROVED" or not property_id or not property_revision:
+                        raise ValueError("GATE_A_APPROVAL_REQUIRED")
+                    if package.get("selected_content_variant_id") != variant_id:
+                        raise ValueError("CONTENT_SELECTION_REQUIRED")
+                    if (variant.get("property_id") != property_id or int(variant.get("property_revision") or 0) != property_revision
+                            or variant.get("facts_revision_id") != f"facts-{property_id}-r{property_revision}"):
+                        raise ValueError("CONTENT_FACTS_REVISION_STALE")
+                    evidence = (package.get("evidence_revisions") or [])
+                    current_evidence = evidence[-1].get("evidence", {}) if evidence else {}
+                    gate_payload = {"classification": "AI_CONTENT_PACKAGE", "rights_status": current_evidence.get("rights_status"), "source_citation_ids": [x.get("source_id") for x in current_evidence.get("citations", []) if x.get("source_id")]}
+                    gate = run_gate_b(gate_payload)
+                    if gate.get("status") != "PASS":
+                        self.send_json({"error": (gate.get("errors") or ["GATE_B_BLOCKED"])[0], "blockers": gate.get("errors", [])}, 422); return
+                    approved = approve_gate_b(gate_payload, gate, owner_id=owner_id)
+                    variant["status"] = "OWNER_APPROVED"
+                    selected = {"content_batch_id": variant["content_batch_id"], "content_variant_id": variant_id, "content_revision": int(variant["content_revision"]), "facts_revision_id": variant["facts_revision_id"], "property_id": property_id, "property_revision": property_revision, "title": variant["title"], "body": variant["body"], "status": approved["status"], "approved_by": owner_id, "approved_at": approved["approved_at"], "gate_b": gate}
+                    package["selected_content"] = selected
+                package["updated_at"] = now_iso(); center._persist(package)
+                self.send_json({"status": variant.get("status"), "content_batch_id": variant.get("content_batch_id"), "content_variant_id": variant_id, "content_revision": variant.get("content_revision"), "published": False, "gate_b": variant.get("status") == "OWNER_APPROVED" and package["selected_content"].get("gate_b")}); return
+        except (KeyError, TypeError, ValueError) as exc:
+            self.send_json({"error": str(exc) or "CONTENT_ACTION_INVALID"}, 422)
 
     def review_route_get(self, path: str) -> bool:
         center = self.review_center_or_error()
@@ -1251,7 +1418,7 @@ class Handler(BaseHTTPRequestHandler):
                             owner_id=owner_id, action="APPROVE_PUBLICATION", idempotency_key=idempotency_key,
                         )
                         recorded = True
-                        projection_result = build_public_projection(center.store, property_id, canonical_path)
+                        projection_result = build_public_projection(center.store, property_id, canonical_path, public_content=package.get("selected_content"))
                         artifact_result = write_staging_web_artifact(projection_result["projection"], website_path)
                     except Exception as exc:
                         rollback_ok = True
@@ -1311,6 +1478,12 @@ class Handler(BaseHTTPRequestHandler):
         if center is None: return True
         try: payload = json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError: self.send_json({"error": "INVALID_REVIEW_JSON"}, 400); return True
+        content_match = re.fullmatch(r"/api/reviews/(review-[a-f0-9]+)/content/(create|edit|select|approve)", path)
+        if content_match:
+            if not isinstance(payload, dict):
+                self.send_json({"error": "CONTENT_REQUEST_INVALID"}, 400); return True
+            self.content_route_post(content_match.group(1), content_match.group(2), payload)
+            return True
         release_match = re.fullmatch(r"/api/reviews/([^/]+)/public-release/(approve|revoke)", path)
         if release_match:
             if not isinstance(payload, dict):
@@ -1389,7 +1562,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = page().replace(b'<section id="ai9-static" class="card">', b'<section id="ai9-static" class="card" hidden>', 1)
             body = body.replace(b"</main><script>", ANALYTICS_CARD + b"</main><script>", 1)
-            body = body.replace(b'</script></body></html>', b'</script>' + PUBLIC_RELEASE_UI + EVIDENCE_UI + ANALYTICS_UI + b'</body></html>', 1)
+            body = body.replace(b'</script></body></html>', b'</script>' + PUBLIC_RELEASE_UI + CONTENT_STUDIO_UI + ANALYTICS_UI + b'</body></html>', 1)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
