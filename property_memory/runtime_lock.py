@@ -11,6 +11,11 @@ class RuntimeLockError(RuntimeError):
     pass
 
 
+# 18876 remains the established staging Admin origin. 18878 is reserved for
+# the isolated First Web Admin service; Customer Web uses 18879.
+SAFE_STAGING_ADMIN_PORTS = frozenset({18876, 18878})
+
+
 @dataclass(frozen=True)
 class RuntimeManifest:
     environment: str
@@ -57,7 +62,8 @@ def validate_runtime_lock(*, manifest_path: str | Path | None = None, environ: d
     for key, wanted in expected.items():
         if str(values.get(key, "")).strip() != wanted:
             raise RuntimeLockError("RUNTIME_IDENTITY_MISMATCH:" + key)
-    if manifest.environment != "staging" or manifest.host != "127.0.0.1" or manifest.port != 18876:
+    if (manifest.environment != "staging" or manifest.host != "127.0.0.1"
+            or manifest.port not in SAFE_STAGING_ADMIN_PORTS):
         raise RuntimeLockError("STAGING_BINDING_REQUIRED")
     if Path(manifest.database).parent != Path(manifest.private_root):
         raise RuntimeLockError("DATABASE_PRIVATE_ROOT_MISMATCH")
