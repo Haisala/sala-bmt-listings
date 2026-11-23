@@ -2234,7 +2234,7 @@ class Handler(BaseHTTPRequestHandler):
             test_root_value = os.environ.get("SALA_E2E_ROOT", "")
             test_root = Path(test_root_value).resolve() if test_root_value else None
             test_only_enabled = (
-                os.environ.get("BMT_ENV") == "test"
+                os.environ.get("BMT_ENV") in {"test", "staging"}
                 and os.environ.get("BMT_TEST_ONLY") == "1"
                 and _is_loopback_host(HOST)
                 and test_root is not None
