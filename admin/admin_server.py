@@ -64,6 +64,7 @@ RETRY_LIMIT = 3
 MAX_BODY = 50 * 1024 * 1024
 MAX_FILE = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".mp4", ".mov", ".m4v", ".mp3", ".m4a", ".wav", ".txt", ".json", ".md"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 CHANNELS = ("public_web", "zalo_company", "facebook", "tiktok")
 SESSIONS: dict[str, float] = {}
 SESSION_OWNERS: dict[str, str] = {}
@@ -865,7 +866,23 @@ class IntakeConflict(ValueError):
         self.code = code
 
 
-def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]], *, supplied_key: str = "", client_batch_id: str | None = None, failure: Callable[[str], None] | None = None) -> tuple[dict, bool]:
+def deduplicate_same_batch_images(files: list[tuple[str, bytes]]) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Keep the first byte-identical image in one POST; leave other files unchanged."""
+    seen_images: set[str] = set()
+    accepted: list[tuple[str, bytes]] = []
+    duplicates: list[str] = []
+    for filename, content in files:
+        digest = media_sha256(content)
+        if Path(filename).suffix.lower() in IMAGE_EXTENSIONS:
+            if digest in seen_images:
+                duplicates.append(filename)
+                continue
+            seen_images.add(digest)
+        accepted.append((filename, content))
+    return accepted, duplicates
+
+
+def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]], *, supplied_key: str = "", client_batch_id: str | None = None, failure: Callable[[str], None] | None = None) -> tuple[dict, bool, dict]:
     """Atomically create one private intake record or replay an existing one.
 
     Parsing and basic size/type validation happen before this boundary. The
@@ -873,6 +890,8 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
     staging, metadata write, and index commit so ThreadingHTTPServer handlers
     cannot race on the JSON ledger.
     """
+    received_count = len(files)
+    files, duplicate_filenames = deduplicate_same_batch_images(files)
     key_material = supplied_key or json.dumps({
         "source": fields.get("source", "Cá nhân"),
         "sourceGroup": fields.get("sourceGroup", ""),
@@ -888,7 +907,8 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
         items = load_index()
         existing = next((x for x in items if x.get("idempotencyKey") == idempotency_key or x.get("id") == intake_id), None)
         if existing:
-            return existing, True
+            return existing, True, {"received": received_count, "accepted": len(existing.get("media", [])),
+                                    "duplicate_count": len(duplicate_filenames), "duplicates": duplicate_filenames}
 
         known_hashes = existing_media_hashes(items)
         request_hashes: set[str] = set()
@@ -909,12 +929,22 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
         try:
             staging.mkdir(mode=0o700, parents=True, exist_ok=False)
             media = []
+            used_filenames: set[str] = set()
             for filename, content in files:
-                target = staging / filename
+                stored_filename = filename
+                if stored_filename in used_filenames:
+                    source_path = Path(filename)
+                    stem, suffix = source_path.stem, source_path.suffix
+                    serial = 2
+                    while stored_filename in used_filenames:
+                        stored_filename = safe_name(f"{stem}-{serial}{suffix}")
+                        serial += 1
+                used_filenames.add(stored_filename)
+                target = staging / stored_filename
                 target.write_bytes(content)
                 target.chmod(0o600)
                 digest = media_sha256(content)
-                media.append({"mediaId": media_identity(digest), "filename": target.name, "path": str((folder / target.name).relative_to(PRIVATE_ROOT)), "bytes": len(content), "sha256": digest})
+                media.append({"mediaId": media_identity(digest), "filename": filename, "storedFilename": stored_filename, "path": str((folder / stored_filename).relative_to(PRIVATE_ROOT)), "bytes": len(content), "sha256": digest})
             record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "status": "RECEIVED", "note": fields.get("note", ""), "media": media, "missingFields": ["title", "area", "price", "legal"], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
             (staging / "metadata.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             (staging / "metadata.json").chmod(0o600)
@@ -926,7 +956,8 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
             save_index(items)
             index_committed = True
             if failure: failure("after_index_commit")
-            return record, False
+            return record, False, {"received": received_count, "accepted": len(media),
+                                   "duplicate_count": len(duplicate_filenames), "duplicates": duplicate_filenames}
         except Exception:
             if staging.exists():
                 shutil.rmtree(staging)
@@ -1062,14 +1093,19 @@ CONTENT_STUDIO_UI = '''<script>
 
 def page() -> bytes:
     return """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SALA BĐS · First Web Admin</title><style>
-:root{font-family:system-ui,sans-serif;color:#15243a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}header{background:#0f2d5b;color:#fff;padding:18px 20px}main{max-width:900px;margin:auto;padding:18px 16px 60px}.grid{display:grid;gap:16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 8px 20px #0f2d5b0c}.kicker{font-size:.72rem;letter-spacing:.12em;font-weight:800;color:#2563eb}h1,h2{margin:0 0 10px}label{display:block;font-weight:700;font-size:.9rem;margin:10px 0 5px}input,textarea,select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}textarea{min-height:90px}button{border:0;border-radius:10px;padding:11px 15px;background:#0f2d5b;color:#fff;font:inherit;font-weight:800;cursor:pointer}.secondary{background:#e8effd;color:#2563eb}.row{display:flex;gap:8px;flex-wrap:wrap}.muted{color:#64748b;font-size:.9rem}.status{display:inline-block;border-radius:999px;padding:4px 9px;background:#e8effd;color:#2563eb;font-size:.75rem;font-weight:800}.item{border-top:1px solid #e5e7eb;padding-top:12px;margin-top:12px}.result{padding:10px 0;border-bottom:1px solid #e5e7eb}.ok{color:#07845e}.err{color:#b91c1c;white-space:pre-wrap}.owner-nav{position:sticky;top:0;z-index:10;display:flex;gap:8px;overflow-x:auto;padding:10px 12px;background:#fff;border-bottom:1px solid #dbe3ee}.owner-nav a{flex:0 0 auto;padding:9px 12px;border-radius:999px;background:#e8effd;color:#0f2d5b;font-weight:750;text-decoration:none;min-height:42px;display:flex;align-items:center}.owner-nav a:focus-visible{outline:3px solid #2563eb;outline-offset:2px}@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}.owner-nav{justify-content:center}}
-</style></head><body><header id="owner-home"><strong>SALA - BĐS</strong><div>First Web · Admin Staging</div></header><nav class="owner-nav" aria-label="Điều hướng Admin"><a href="#owner-home">Trang chủ</a><a href="#intake-section">Nhập nguồn</a><a href="#property-search">Property Core</a><a href="#review-section">Review / Gate A</a><a href="#review-section">Web Publish</a><a href="#owner-analytics">Traffic</a></nav><main><section id="intake-section" class="card"><p class="kicker">INTAKE</p><h1>Nhận nguồn mới</h1><p class="muted">Bản gốc lưu ngoài public root. Intake vào Property Core sau xử lý và Gate A; Website publish là quyết định riêng.</p><form id="intake" enctype="multipart/form-data"><label>Nguồn</label><select name="source"><option>Cá nhân</option><option>Zalo công ty</option><option>Khác</option></select><label>Nhóm/nguồn chi tiết</label><input name="sourceGroup" placeholder="Tên nhóm hoặc người cung cấp (nếu có)"><label>Thông tin sơ bộ</label><textarea name="note" placeholder="Giá, khu vực, pháp lý... chỉ ghi điều nguồn cung cấp"></textarea><label>Ảnh, video, ghi âm hoặc file gốc</label><input name="media" type="file" multiple accept="image/*,video/*,audio/*,.txt,.json,.md"><br><br><button type="submit">Lưu intake</button></form><p id="intake-msg"></p></section><section id="property-search" class="card"><p class="kicker">PROPERTY CORE</p><h2>Tra cứu listing thật</h2><form id="search"><input name="q" placeholder="Ví dụ: Thôn 8 sổ riêng 2 tỷ"><br><br><button class="secondary" type="submit">Tìm trong Property Core</button></form><div id="results"></div></section><section id="review-section" class="card"><p class="kicker">REVIEW CENTER · PRIVATE</p><h2>Hàng chờ duyệt Gate A</h2><p class="muted">Phân tích nội bộ chỉ dành cho Admin. Sửa thông tin quan trọng sẽ làm review thành STALE_REVIEW và phải tạo lại phân tích.</p><div id="reviews" class="muted">Đang tải...</div><div id="review-detail"></div></section><section class="card"><p class="kicker">QUEUE</p><h2>Approval Queue</h2><div id="queue" class="muted">Đang tải...</div></section></main><script>
+:root{font-family:system-ui,sans-serif;color:#15243a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}header{background:#0f2d5b;color:#fff;padding:18px 20px}main{max-width:900px;margin:auto;padding:18px 16px 60px}.grid{display:grid;gap:16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 8px 20px #0f2d5b0c}.kicker{font-size:.72rem;letter-spacing:.12em;font-weight:800;color:#2563eb}h1,h2{margin:0 0 10px}label{display:block;font-weight:700;font-size:.9rem;margin:10px 0 5px}input,textarea,select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}textarea{min-height:90px}button{border:0;border-radius:10px;padding:11px 15px;background:#0f2d5b;color:#fff;font:inherit;font-weight:800;cursor:pointer}.secondary{background:#e8effd;color:#2563eb}.row{display:flex;gap:8px;flex-wrap:wrap}.muted{color:#64748b;font-size:.9rem}.status{display:inline-block;border-radius:999px;padding:4px 9px;background:#e8effd;color:#2563eb;font-size:.75rem;font-weight:800}.item{border-top:1px solid #e5e7eb;padding-top:12px;margin-top:12px}.result{padding:10px 0;border-bottom:1px solid #e5e7eb}.ok{color:#07845e}.err{color:#b91c1c;white-space:pre-wrap}.owner-nav{position:sticky;top:0;z-index:10;display:flex;gap:8px;overflow-x:auto;padding:10px 12px;background:#fff;border-bottom:1px solid #dbe3ee}.owner-nav a{flex:0 0 auto;padding:9px 12px;border-radius:999px;background:#e8effd;color:#0f2d5b;font-weight:750;text-decoration:none;min-height:42px;display:flex;align-items:center}.owner-nav a:focus-visible{outline:3px solid #2563eb;outline-offset:2px}.intake-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(135px,1fr));gap:10px;margin:10px 0}.intake-media-card{min-width:0;border:1px solid #dbe3ee;border-radius:12px;padding:8px;background:#fff}.intake-media-thumb{display:block;width:100%;height:112px;object-fit:cover;border-radius:8px;background:#f1f5f9}.intake-media-open{width:100%;padding:0;background:none}.intake-media-name{display:block;overflow-wrap:anywhere;font-size:.82rem;margin:6px 0}.intake-media-card button.remove-media{width:100%;min-height:42px;background:#fff1f2;color:#9f1239}.intake-media-duplicate{display:block;color:#a16207;font-size:.76rem;margin:4px 0}.intake-preview{max-width:min(94vw,900px);max-height:90vh;border:0;border-radius:14px;padding:12px}.intake-preview img{display:block;max-width:88vw;max-height:78vh;object-fit:contain}.intake-preview::backdrop{background:#0f172acc}@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}.owner-nav{justify-content:center}}
+</style></head><body><header id="owner-home"><strong>SALA - BĐS</strong><div>First Web · Admin Staging</div></header><nav class="owner-nav" aria-label="Điều hướng Admin"><a href="#owner-home">Trang chủ</a><a href="#intake-section">Nhập nguồn</a><a href="#property-search">Property Core</a><a href="#review-section">Review / Gate A</a><a href="#review-section">Web Publish</a><a href="#owner-analytics">Traffic</a></nav><main><section id="intake-section" class="card"><p class="kicker">INTAKE</p><h1>Nhận nguồn mới</h1><p class="muted">Bản gốc lưu ngoài public root. Intake vào Property Core sau xử lý và Gate A; Website publish là quyết định riêng.</p><form id="intake" enctype="multipart/form-data"><label>Nguồn</label><select name="source"><option>Cá nhân</option><option>Zalo công ty</option><option>Khác</option></select><label>Nhóm/nguồn chi tiết</label><input name="sourceGroup" placeholder="Tên nhóm hoặc người cung cấp (nếu có)"><label>Thông tin sơ bộ</label><textarea name="note" placeholder="Giá, khu vực, pháp lý... chỉ ghi điều nguồn cung cấp"></textarea><label for="intake-media-input">Ảnh, video, ghi âm hoặc file gốc</label><input id="intake-media-input" name="media" type="file" multiple accept="image/*,video/*,audio/*,.txt,.json,.md"><p id="intake-media-count" class="muted" aria-live="polite">0 ảnh/tệp đã chọn</p><div id="intake-media-list" class="intake-media-grid"></div><dialog id="intake-preview" class="intake-preview"><button id="intake-preview-close" type="button" class="secondary">Đóng ảnh</button><img id="intake-preview-image" alt="Ảnh xem trước"></dialog><button id="intake-save" type="submit">Lưu intake</button></form><p id="intake-msg" role="status"></p></section><section id="property-search" class="card"><p class="kicker">PROPERTY CORE</p><h2>Tra cứu listing thật</h2><form id="search"><input name="q" placeholder="Ví dụ: Thôn 8 sổ riêng 2 tỷ"><br><br><button class="secondary" type="submit">Tìm trong Property Core</button></form><div id="results"></div></section><section id="review-section" class="card"><p class="kicker">REVIEW CENTER · PRIVATE</p><h2>Hàng chờ duyệt Gate A</h2><p class="muted">Phân tích nội bộ chỉ dành cho Admin. Sửa thông tin quan trọng sẽ làm review thành STALE_REVIEW và phải tạo lại phân tích.</p><div id="reviews" class="muted">Đang tải...</div><div id="review-detail"></div></section><section class="card"><p class="kicker">QUEUE</p><h2>Approval Queue</h2><div id="queue" class="muted">Đang tải...</div></section></main><script>
 const $=s=>document.querySelector(s);const mojibake={'C�� nh��n':'Cá nhân','C�� nh��n':'Cá nhân','Zalo c��ng ty':'Zalo công ty','Kh��c':'Khác'};const displayText=s=>{const v=String(s??'');return mojibake[v]||(/[�]/.test(v)?'Nội dung tiếng Việt đã lưu':v);};const esc=s=>String(displayText(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function loadReviews(){const r=await fetch('/api/reviews');const d=await r.json();if(!r.ok){$('#reviews').textContent=d.error||'Không tải được review';return}$('#reviews').innerHTML=d.length?d.map(x=>`<div class="item"><button class="secondary" data-review="${esc(x.review_id)}">Mở</button> <b>${esc(x.state)}</b> · ${esc(x.source||'')} · ${esc(x.intake_id||'')} · revision ${x.review_revision}</div>`).join(''):'Chưa có review.';document.querySelectorAll('[data-review]').forEach(b=>b.onclick=()=>loadReview(b.dataset.review))}
 async function loadReview(id){const r=await fetch('/api/reviews/'+encodeURIComponent(id));const x=await r.json();if(!r.ok){$('#review-detail').textContent=x.error;return}const ia=x.internal_analysis||{},ds=ia.deal_score||{};$('#review-detail').innerHTML=`<div class="item"><h3>${esc(x.state)} · revision ${x.review_revision}</h3><h4>Nguồn / provenance</h4><pre>${esc(JSON.stringify(x.candidate?.raw||x.candidate?.provenance||{},null,2))}</pre><h4>Property facts</h4><pre>${esc(JSON.stringify(x.candidate?.facts||{},null,2))}</pre><h4>Thiếu / chưa Owner xác nhận</h4><pre>${esc(JSON.stringify(x.candidate?.missing_fields||[],null,2))}</pre><h4>Market / Comparable / Valuation</h4><pre>${esc(JSON.stringify({snapshot:x.market_snapshot?.market_snapshot_id,comparables:x.comparable_set?.status,valuation:x.valuation?.valuation_summary||x.valuation},null,2))}</pre><h4>AI Internal Analysis · PRIVATE</h4><pre>${esc(JSON.stringify({score:ds, strengths:ia.strengths, risks:ia.weaknesses_risks, anomalies:ia.anomalies, missing:ia.missing_information, questions:ia.questions_to_verify, recommendation:ia.recommended_action, confidence:ia.confidence},null,2))}</pre><p class="err">${x.state==='STALE_REVIEW'?'Phân tích đã cũ; không thể duyệt.':''}</p><label>Sửa field</label><input id="review-field" placeholder="ví dụ transaction_type, price_vnd_per_month, house_type, bedrooms"><input id="review-value" placeholder="Giá trị mới"><button data-edit-review>SAVE REVIEW REVISION</button> <button data-approve-review ${x.state==='STALE_REVIEW'||x.state==='REJECTED'?'disabled':''}>DUYỆT GATE A</button> <button data-reject-review>BỎ / TỪ CHỐI</button><p id="review-msg"></p></div>`;document.querySelector('[data-edit-review]').onclick=()=>reviewAction(id,'edit',x.review_revision,{field:$('#review-field').value,value:$('#review-value').value,owner_id:'owner'});document.querySelector('[data-approve-review]').onclick=()=>reviewAction(id,'approve',x.review_revision,{decision:'CREATE_NEW_PROPERTY',idempotency_key:'ui:'+id+':'+x.review_revision,owner_id:'owner'});document.querySelector('[data-reject-review]').onclick=()=>reviewAction(id,'reject',x.review_revision,{reason:'Owner rejected',owner_id:'owner'})}
 async function reviewAction(id,kind,revision,extra){const r=await fetch('/api/reviews/'+id+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:revision,...extra})});const d=await r.json();const gateErrors={MISSING_FIELDS_REQUIRE_OWNER:'Cần Owner bổ sung/xác nhận trường bắt buộc theo loại BĐS.',PROPERTY_TYPE_UNSUPPORTED:'Loại BĐS chưa có quy tắc Gate A.',RENT_PERIOD_NOT_SUPPORTED_BY_PROPERTY_CORE:'Property Core hiện chỉ lưu được giá thuê theo tháng; kỳ hạn này chưa thể duyệt.',SALE_PRICE_PERIOD_INVALID:'Giá bán không nhận chu kỳ thuê.'};$('#review-msg').textContent=r.ok?'Đã cập nhật: '+(d.state||'OK'):(gateErrors[d.error]||d.error||'Lỗi');loadReviews();if(r.ok)loadReview(id)}
 async function load(){let r=await fetch('/api/intakes');let d=await r.json();$('#queue').innerHTML=d.length?d.map(x=>`<div class="item"><b>${esc(x.id)}</b> <span class="status">${esc(x.status)}</span><div>${esc(x.source)} · ${esc(x.createdAt)}</div><div class="muted">${x.media.length} media · ${esc(x.note||'Không có ghi chú')}</div></div>`).join(''):'Chưa có intake.'}
-$('#intake').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget;let m=$('#intake-msg');m.textContent='Đang lưu...';m.className='muted';try{let r=await fetch('/api/intakes',{method:'POST',body:new FormData(form),credentials:'same-origin'}),d=await r.json();if(r.status!==201)throw Error(d.error||`INTAKE_FAILED_HTTP_${r.status}`);m.className='ok';m.textContent='Đã lưu '+d.id+' · bản gốc nằm ngoài public root.';form.reset();load()}catch(x){m.className='err';m.textContent=x.message||'Không thể lưu intake.'}});
+const intakeForm=$('#intake'),mediaInput=$('#intake-media-input'),mediaCount=$('#intake-media-count'),mediaList=$('#intake-media-list'),previewDialog=$('#intake-preview'),previewImage=$('#intake-preview-image'),previewClose=$('#intake-preview-close'),saveIntake=$('#intake-save');let intakeFiles=[],intakeBusy=false,intakeScanGeneration=0;
+const isImageFile=file=>file.type.startsWith('image/')||/\\.(jpe?g|png|webp|heic)$/i.test(file.name);
+function renderIntakeFiles(){mediaCount.textContent=intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length===1?'1 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn';mediaList.replaceChildren();intakeFiles.forEach((item,index)=>{const card=document.createElement('div');card.className='intake-media-card';if(item.url){const open=document.createElement('button');open.type='button';open.className='intake-media-open';open.setAttribute('aria-label','Phóng to '+item.file.name);const img=document.createElement('img');img.className='intake-media-thumb';img.src=item.url;img.alt=item.file.name;open.append(img);open.onclick=()=>{previewImage.src=item.url;previewImage.alt=item.file.name;if(previewDialog.showModal)previewDialog.showModal();else window.open(item.url,'_blank','noopener')};card.append(open)}else{const icon=document.createElement('div');icon.className='intake-media-thumb';icon.textContent='TỆP';icon.setAttribute('aria-hidden','true');icon.style.display='grid';icon.style.placeItems='center';card.append(icon)}const name=document.createElement('span');name.className='intake-media-name';name.textContent=item.file.name+' · '+Math.ceil(item.file.size/1024)+' KB';card.append(name);if(item.duplicate){const badge=document.createElement('span');badge.className='intake-media-duplicate';badge.textContent='Ảnh trùng bytes · máy chủ sẽ giữ bản đầu';card.append(badge)}const remove=document.createElement('button');remove.type='button';remove.className='remove-media';remove.textContent='Bỏ ảnh/tệp';remove.disabled=intakeBusy;remove.onclick=()=>{if(item.url)URL.revokeObjectURL(item.url);intakeFiles.splice(index,1);scanIntakeDuplicates()};card.append(remove);mediaList.append(card)})}
+async function scanIntakeDuplicates(){const generation=++intakeScanGeneration;intakeBusy=true;mediaInput.disabled=true;renderIntakeFiles();const seen=new Set();let unsupported=false;for(const item of intakeFiles){item.duplicate=false;if(!isImageFile(item.file))continue;if(!window.crypto||!window.crypto.subtle){unsupported=true;continue}try{const bytes=await item.file.arrayBuffer(),digest=Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');item.duplicate=seen.has(digest);seen.add(digest)}catch(_){unsupported=true}}if(generation!==intakeScanGeneration)return;intakeBusy=false;mediaInput.disabled=false;renderIntakeFiles();const duplicates=intakeFiles.filter(x=>x.duplicate).length;mediaCount.textContent=(intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn')+(duplicates?' · phát hiện '+duplicates+' ảnh trùng, bản đầu được giữ':'')+(unsupported?' · máy chủ sẽ kiểm tra trùng bytes':'')}
+mediaInput.addEventListener('change',()=>{const added=Array.from(mediaInput.files||[]);mediaInput.value='';for(const file of added)intakeFiles.push({file,url:isImageFile(file)?URL.createObjectURL(file):null,duplicate:false});scanIntakeDuplicates()});previewClose.addEventListener('click',()=>previewDialog.close());previewDialog.addEventListener('click',e=>{if(e.target===previewDialog)previewDialog.close()});window.addEventListener('pagehide',()=>intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)}));
+intakeForm.addEventListener('submit',async e=>{e.preventDefault();if(intakeBusy)return;intakeBusy=true;saveIntake.disabled=true;mediaInput.disabled=true;const m=$('#intake-msg');m.textContent='Đang lưu...';m.className='muted';try{const data=new FormData(intakeForm);data.delete('media');intakeFiles.forEach(x=>data.append('media',x.file,x.file.name));const r=await fetch('/api/intakes',{method:'POST',body:data,credentials:'same-origin'});let d;try{d=await r.json()}catch(_){throw Error('Máy chủ trả về phản hồi không hợp lệ.')}if(r.status!==201&&r.status!==200)throw Error(d.error||d.code||`INTAKE_FAILED_HTTP_${r.status}`);const u=d.upload||{received:intakeFiles.length,accepted:d.media?.length||0,duplicate_count:0,duplicates:[]};m.className='ok';m.textContent=(d.idempotent_replay?'Đã nhận lại intake ':'Đã lưu intake ')+d.id+' · '+u.accepted+'/'+u.received+' tệp được giữ.'+(u.duplicate_count?' Đã bỏ '+u.duplicate_count+' ảnh trùng: '+u.duplicates.join(', ')+'.':'');intakeForm.reset();intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)});intakeFiles=[];renderIntakeFiles();load()}catch(x){m.className='err';m.textContent=x.message||'Không thể lưu intake.'}finally{intakeBusy=false;saveIntake.disabled=false;mediaInput.disabled=false;renderIntakeFiles()}});
 $('#search').onsubmit=async e=>{e.preventDefault();let q=new FormData(e.target).get('q');let r=await fetch('/api/search?q='+encodeURIComponent(q));let d=await r.json();$('#results').innerHTML=d.length?d.map(x=>`<div class="result"><b>${esc(x.title)}</b><br>${esc(x.slug)} · ${esc(x.source||'Chưa có nguồn')}<br>${esc(x.location||x.addressText||'')}</div>`).join(''):'Không có listing khớp dữ liệu thật.'};load();loadReviews();
 </script></body></html>""".replace("out.textContent+='" + chr(10) + "CLEANUP:", "out.textContent+='\\\\nCLEANUP:").replace("AI9 TEST ONLY", "BỘ XỬ LÝ CONTENT · TEST_ONLY").replace("Nguồn / provenance", "Nguồn & quyền sử dụng").encode("utf-8")
 
@@ -1983,7 +2019,7 @@ class Handler(BaseHTTPRequestHandler):
             record = None
             cleanup_errors = []
             try:
-                record, _ = create_intake_record(fixture, [], supplied_key="ai9-server-test-only:" + uuid.uuid4().hex, client_batch_id=None)
+                record, _, _ = create_intake_record(fixture, [], supplied_key="ai9-server-test-only:" + uuid.uuid4().hex, client_batch_id=None)
                 package = process_intake(center.store, center, record, ai_gateway=AI_GATEWAY, operation_id="ai9-test-only")
                 preview = run_ai9_preview(package)
                 receipt = {"response_status": 200, "review_id": package["review_id"], "layers": {k: (v or {}).get("status") for k, v in preview.get("layers", {}).items()}, "errors": preview.get("errors", []), "mutated_property_store": preview.get("mutated_property_store"), "published": preview.get("published")}
@@ -2162,7 +2198,7 @@ class Handler(BaseHTTPRequestHandler):
         supplied_key = self.headers.get("X-Idempotency-Key", "").strip()
         client_batch_id = (self.headers.get("X-Client-Batch-ID", "").strip() or fields.get("clientBatchId", "").strip() or None)
         try:
-            record, replay = create_intake_record(fields, files, supplied_key=supplied_key, client_batch_id=client_batch_id)
+            record, replay, upload = create_intake_record(fields, files, supplied_key=supplied_key, client_batch_id=client_batch_id)
         except IntakeConflict as exc:
             self.send_json({"error": str(exc), "code": exc.code}, 200 if exc.code == "INTAKE_REPLAY" else 409)
             return
@@ -2177,7 +2213,7 @@ class Handler(BaseHTTPRequestHandler):
         operation_id = record["operationId"]
         idempotency_key = record["idempotencyKey"]
         append_audit("intake_create", intake_id, "succeeded", None, 1, operation_id=operation_id, idempotency_key=idempotency_key)
-        self.send_json(record, 200 if replay else 201)
+        self.send_json({**record, "upload": upload, "idempotent_replay": replay}, 200 if replay else 201)
 
 
 def main() -> None:

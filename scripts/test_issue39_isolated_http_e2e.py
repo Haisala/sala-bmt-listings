@@ -61,15 +61,18 @@ def json_call(url: str, *, method: str = "GET", obj: Any = None,
     return status, response_headers, parsed
 
 
-def multipart(fields: dict[str, str], filename: str | None = None, content: bytes = b"") -> tuple[str, bytes]:
+def multipart(fields: dict[str, str], filename: str | None = None, content: bytes = b"",
+              files: list[tuple[str, bytes]] | None = None) -> tuple[str, bytes]:
     boundary = "SALA-ISSUE39-TEST-ONLY-BOUNDARY"
     chunks = []
     for name, value in fields.items():
         chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
-    if filename:
-        chunks.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"{filename}\"\r\n"
-                       "Content-Type: image/png\r\n\r\n").encode())
-        chunks.extend((content, b"\r\n"))
+    upload_files = files if files is not None else ([(filename, content)] if filename else [])
+    for upload_name, upload_content in upload_files:
+        content_type = "text/plain" if Path(upload_name).suffix.lower() == ".txt" else "image/png"
+        chunks.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"media\"; filename=\"{upload_name}\"\r\n"
+                       f"Content-Type: {content_type}\r\n\r\n").encode())
+        chunks.extend((upload_content, b"\r\n"))
     chunks.append(f"--{boundary}--\r\n".encode())
     return f"multipart/form-data; boundary={boundary}", b"".join(chunks)
 
@@ -364,15 +367,85 @@ def run_e2e() -> None:
         # (a) no Gate A and (b) Gate A without Web publication both yield no Customer data.
         status, _, empty_before = request(customer_origin + "/api/listings")
         check(status == 503, "before_gate_a_customer_fail_closed", evidence, f"HTTP {status}")
-        fields = {"source": "Cá nhân", "sourceGroup": "TEST_ONLY", "note": "TEST_ONLY synthetic Admin-to-Web E2E property"}
-        content_type, body = multipart(fields)
+        empty_type, empty_body = multipart({})
+        status, _, empty_raw = request(admin_origin + "/api/intakes", method="POST", data=empty_body,
+                                       headers={**admin_headers, "Content-Type": empty_type})
+        check(status == 400, "empty_note_and_files_validation_unchanged", evidence, f"HTTP {status}")
+        test_media_fields = {"source": "TEST_ONLY", "sourceGroup": "SYNTHETIC", "note": "TEST_ONLY upload dedup fixture"}
+        intake_files = [(f"IMG_{i}.jpg", PNG + bytes([i])) for i in range(1, 7)]
+        intake_files.insert(1, ("IMG_3143-copy.webp", intake_files[0][1]))
+        content_type, body = multipart(test_media_fields, files=intake_files)
+        media_headers = {**admin_headers, "Content-Type": content_type, "X-Idempotency-Key": "TEST_ONLY-seven-one-duplicate"}
+        status, _, batch_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=media_headers)
+        batch = json.loads(batch_raw)
+        check(status == 201 and len(batch.get("media", [])) == 6
+              and batch.get("upload") == {"received": 7, "accepted": 6, "duplicate_count": 1,
+                                           "duplicates": ["IMG_3143-copy.webp"]},
+              "seven_uploads_one_exact_duplicate", evidence, f"HTTP {status}")
+        status, _, batch_replay_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=media_headers)
+        batch_replay = json.loads(batch_replay_raw)
+        check(status == 200 and batch_replay.get("id") == batch.get("id")
+              and batch_replay.get("upload", {}).get("accepted") == 6,
+              "seven_upload_replay_idempotent", evidence, f"HTTP {status}")
+        cross_type, cross_body = multipart({**test_media_fields, "note": "TEST_ONLY cross-intake duplicate"},
+                                           files=[("new-name.jpg", intake_files[0][1])])
+        status, _, cross_raw = request(admin_origin + "/api/intakes", method="POST", data=cross_body,
+                                       headers={**admin_headers, "Content-Type": cross_type,
+                                                "X-Idempotency-Key": "TEST_ONLY-cross-intake-hash-01"})
+        check(status == 409 and json.loads(cross_raw).get("code") == "DUPLICATE_MEDIA",
+              "existing_intake_hash_duplicate_still_conflicts", evidence, f"HTTP {status}")
+        status, _, batch_cleanup = json_call(admin_origin + f"/api/intakes/{batch['id']}", method="DELETE", obj=None,
+                                              headers={**admin_headers, "X-Test-Fixture": "TEST_ONLY"})
+        check(status == 200 and batch_cleanup.get("status") == "REMOVED",
+              "seven_upload_fixture_cleanup", evidence, f"HTTP {status}")
+        nonimage_type, nonimage_body = multipart(test_media_fields, files=[("a.txt", b"TEST_ONLY-text-duplicate"),
+                                                                             ("b.txt", b"TEST_ONLY-text-duplicate")])
+        status, _, nonimage_raw = request(admin_origin + "/api/intakes", method="POST", data=nonimage_body,
+                                           headers={**admin_headers, "Content-Type": nonimage_type,
+                                                    "X-Idempotency-Key": "TEST_ONLY-nonimage-duplicate-01"})
+        check(status == 409 and json.loads(nonimage_raw).get("code") == "DUPLICATE_MEDIA",
+              "nonimage_duplicate_keeps_previous_conflict", evidence, f"HTTP {status}")
+        exact_type, exact_body = multipart(test_media_fields, files=[("same.jpg", b"TEST_ONLY-exact-same"),
+                                                                       ("same.jpg", b"TEST_ONLY-exact-same")])
+        status, _, exact_raw = request(admin_origin + "/api/intakes", method="POST", data=exact_body,
+                                       headers={**admin_headers, "Content-Type": exact_type,
+                                                "X-Idempotency-Key": "TEST_ONLY-same-name-exact-01"})
+        exact = json.loads(exact_raw)
+        check(status == 201 and len(exact.get("media", [])) == 1 and exact.get("upload", {}).get("duplicate_count") == 1,
+              "same_filename_exact_duplicate_keeps_first", evidence, f"HTTP {status}")
+        status, _, exact_cleanup = json_call(admin_origin + f"/api/intakes/{exact['id']}", method="DELETE", obj=None,
+                                              headers={**admin_headers, "X-Test-Fixture": "TEST_ONLY"})
+        check(status == 200, "same_filename_exact_fixture_cleanup", evidence, f"HTTP {status}")
         intake_headers = {**admin_headers, "Content-Type": content_type, "X-Idempotency-Key": "TEST_ONLY-intake-e2e-01"}
+        intake_fields = {"source": "Cá nhân", "sourceGroup": "TEST_ONLY", "note": "TEST_ONLY synthetic Admin-to-Web E2E property"}
+        content_type, body = multipart(intake_fields)
+        intake_headers["Content-Type"] = content_type
         status, _, intake_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=intake_headers)
         intake = json.loads(intake_raw)
-        check(status == 201 and intake.get("status") == "RECEIVED", "admin_http_intake", evidence, f"HTTP {status}")
+        check(status == 201 and intake.get("status") == "RECEIVED" and intake.get("media") == []
+              and intake.get("upload", {}).get("accepted") == 0,
+              "admin_http_note_only_intake", evidence, f"HTTP {status}")
         status, _, replay_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=intake_headers)
         replay = json.loads(replay_raw)
-        check(status == 200 and replay.get("id") == intake.get("id"), "admin_intake_replay_single_record", evidence, f"HTTP {status}")
+        check(status == 200 and replay.get("id") == intake.get("id") and replay.get("upload", {}).get("accepted") == 0
+              and replay.get("upload", {}).get("duplicate_count") == 0,
+              "admin_intake_replay_single_record", evidence, f"HTTP {status}")
+        collision_files = [("same-name.jpg", PNG + b"first"), ("same-name.jpg", PNG + b"second")]
+        collision_type, collision_body = multipart({**test_media_fields, "note": "TEST_ONLY same filename distinct bytes"}, files=collision_files)
+        status, _, collision_raw = request(admin_origin + "/api/intakes", method="POST", data=collision_body,
+                                            headers={**admin_headers, "Content-Type": collision_type,
+                                                     "X-Idempotency-Key": "TEST_ONLY-same-name-distinct-01"})
+        collision = json.loads(collision_raw)
+        check(status == 201 and len(collision.get("media", [])) == 2
+              and len({x.get("storedFilename") for x in collision.get("media", [])}) == 2,
+              "same_filename_distinct_bytes_preserved", evidence, f"HTTP {status}")
+        for item, expected in zip(collision["media"], (collision_files[0][1], collision_files[1][1])):
+            check((root / "admin-private" / item["path"]).read_bytes() == expected,
+                  "same_filename_media_bytes_not_overwritten", evidence)
+        status, _, collision_cleanup = json_call(admin_origin + f"/api/intakes/{collision['id']}", method="DELETE",
+                                                  obj=None, headers={**admin_headers, "X-Test-Fixture": "TEST_ONLY"})
+        check(status == 200 and collision_cleanup.get("status") == "REMOVED",
+              "same_filename_fixture_cleanup", evidence, f"HTTP {status}")
         status, _, processed_raw = request(admin_origin + f"/api/intakes/{intake['id']}/process", method="POST", data=b"", headers={**admin_headers, "Content-Length": "0"})
         processed = json.loads(processed_raw)
         check(status == 201 and processed.get("state") == "PENDING_REVIEW", "admin_http_process_review", evidence, f"HTTP {status}")
