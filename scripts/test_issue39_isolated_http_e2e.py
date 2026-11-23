@@ -696,9 +696,10 @@ def run_e2e() -> None:
 
         status, _, owner_page = request(admin_origin + "/", headers=admin_headers)
         page_text = owner_page.decode("utf-8")
-        check(status == 200 and all(anchor in page_text for anchor in ("#intake-section", "#property-search", "#review-section", "#owner-analytics"))
-              and '<a href="#review-section">Web Publish</a>' in page_text
-              and '<a href="#owner-analytics">Traffic</a>' in page_text,
+        check(status == 200 and all(anchor in page_text for anchor in ("#home-dashboard", "#intake-section", "#review-section", "#queue-section", "/website"))
+              and '<nav class="home-bottom-nav"' in page_text
+              and ">Home</a>" in page_text and ">Nguồn</a>" in page_text
+              and ">Content</a>" in page_text and ">Website</a>" in page_text and ">Khác</a>" in page_text,
               "owner_mobile_navigation_present", evidence, f"HTTP {status}")
         check("AI9 TEST ONLY" not in page_text and "Chạy AI9 TEST_ONLY" not in page_text and "local-only" not in page_text
               and "TẠO CONTENT" in page_text and "/create-content" in page_text,
@@ -775,8 +776,28 @@ def run_e2e() -> None:
         status, _, disabled_content = json_call(admin_origin + f"/api/intakes/{intake['id']}/create-content",
                                                  method="POST", obj={"idempotency_key":"TEST_ONLY-disabled-content-01"},
                                                  headers=admin_headers)
-        check(status == 403 and disabled_content.get("error") == "CONTENT_PHASE_DISABLED",
-              "staging_content_provider_remains_disabled", evidence, f"HTTP {status}")
+        check(status == 409 and disabled_content.get("error") == "CONTENT_PREREQUISITES_REQUIRED"
+              and disabled_content.get("provider_calls") == 0 and disabled_content.get("published") is False,
+              "missing_content_prerequisites_block_before_provider", evidence, f"HTTP {status}")
+        draft_facts = {
+            "title": "TEST_ONLY HTTP apartment", "address": "TEST_ONLY E2E address",
+            "area": "70 m²", "property_type": "APARTMENT", "transaction_type": "SALE",
+            "price_vnd": 1_000_000_000,
+        }
+        status, _, draft = json_call(
+            admin_origin + f"/api/intakes/{intake['id']}/draft", method="POST",
+            obj={"expected_input_revision": 1, "facts": draft_facts,
+                 "evidence": {"source_id": "TEST_ONLY-source-e2e", "claim": "TEST_ONLY synthetic listing source",
+                              "rights_status": "PERSONAL"}},
+            headers=admin_headers)
+        check(status == 201 and draft.get("id") == intake["id"] and draft.get("input_revision") == 2,
+              "same_intake_draft_saved_with_rights", evidence, f"HTTP {status}")
+        status, _, disabled_content = json_call(
+            admin_origin + f"/api/intakes/{intake['id']}/create-content", method="POST",
+            obj={"idempotency_key": "TEST_ONLY-disabled-content-02"}, headers=admin_headers)
+        check(status == 403 and disabled_content.get("error") == "CONTENT_PHASE_DISABLED"
+              and disabled_content.get("provider_calls") == 0 and disabled_content.get("published") is False,
+              "staging_content_provider_remains_disabled_after_prerequisites", evidence, f"HTTP {status}")
         status, _, replay_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=intake_headers)
         replay = json.loads(replay_raw)
         check(status == 200 and replay.get("id") == intake.get("id") and replay.get("upload", {}).get("accepted") == 1

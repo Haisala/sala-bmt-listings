@@ -51,6 +51,7 @@ try:
 except ImportError:  # Running admin_server.py as the service entrypoint.
     from one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP
 from property_memory.evidence import validate_evidence_payload
+from property_memory.keychain import CredentialError, resolve_openai_key
 from property_memory.runtime_config import diagnostic_payload, health_payload, load_runtime_config
 from property_memory.runtime_lock import validate_runtime_lock
 from property_memory.store import PropertyStore
@@ -85,6 +86,8 @@ _ANALYTICS_RATE_LOCK = threading.Lock()
 _ANALYTICS_RATE_TIMES: deque[float] = deque()
 _AI_ENABLED = os.environ.get("BMT_OPENAI_EXTRACTION", "0").strip().lower() in {"1", "true", "yes"}
 _CONTENT_LIVE_ENABLED = os.environ.get("BMT_OPENAI_CONTENT_LIVE", "0").strip().lower() in {"1", "true", "yes"}
+_CREDENTIAL_PREFLIGHT_LOCK = threading.Lock()
+_CREDENTIAL_PREFLIGHT_LAST_AT = 0.0
 class LazyUsageLedger:
     """Open the private usage database only when a usage operation is requested."""
 
@@ -2426,6 +2429,48 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_trusted_origin():
             return
         raw = self.rfile.read(length)
+        if path == "/api/admin/credential-preflight":
+            if not self.require_auth():
+                return
+            if os.environ.get("BMT_ENV") != "staging":
+                self.send_json({"status": "BLOCKED", "error": "STAGING_ONLY", "request_sent": False}, 403)
+                return
+            expected_owner = os.environ.get("BMT_ADMIN_OWNER_ID", "owner").strip() or "owner"
+            if self.owner_id() != expected_owner:
+                self.send_json({"status": "BLOCKED", "error": "OWNER_SESSION_REQUIRED", "request_sent": False}, 403)
+                return
+            try:
+                request_payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.send_json({"status": "BLOCKED", "error": "INVALID_PREFLIGHT_REQUEST", "request_sent": False}, 400)
+                return
+            if request_payload != {}:
+                self.send_json({"status": "BLOCKED", "error": "INVALID_PREFLIGHT_REQUEST", "request_sent": False}, 400)
+                return
+            global _CREDENTIAL_PREFLIGHT_LAST_AT
+            now = time.monotonic()
+            with _CREDENTIAL_PREFLIGHT_LOCK:
+                remaining = 15.0 - (now - _CREDENTIAL_PREFLIGHT_LAST_AT)
+                if remaining > 0:
+                    self.send_json({"status": "BLOCKED", "error": "PREFLIGHT_RATE_LIMITED",
+                                    "retry_after_seconds": int(remaining) + 1, "request_sent": False}, 429)
+                    return
+                _CREDENTIAL_PREFLIGHT_LAST_AT = now
+            try:
+                credential = resolve_openai_key(allow_env_fallback=False)
+                ready = bool(credential)
+                del credential
+                if not ready:
+                    self.send_json({"status": "MISSING", "error": "KEYCHAIN_CREDENTIAL_MISSING",
+                                    "request_sent": False}, 503)
+                    return
+                self.send_json({"status": "READY", "credential_source": "KEYCHAIN",
+                                "request_sent": False, "secret_returned": False})
+            except CredentialError as exc:
+                status = "MISSING" if exc.code == "KEYCHAIN_CREDENTIAL_MISSING" else "BLOCKED"
+                self.send_json({"status": status, "error": exc.code, "os_status": exc.os_status,
+                                "request_sent": False, "secret_returned": False}, 503)
+            return
         evidence_match = re.fullmatch(r"/api/reviews/(review-[a-f0-9]+)/evidence", path)
         if evidence_match:
             if not self.require_auth():
@@ -2643,7 +2688,9 @@ class Handler(BaseHTTPRequestHandler):
             if expected_revision is not None and expected_revision != current_revision:
                 self.send_json({"error": "STALE_INTAKE_REVISION", "input_revision": current_revision}, 409); return
             incoming_facts = payload.get("facts", {})
-            if not isinstance(incoming_facts, dict) or any(key not in KNOWN_FIELDS for key in incoming_facts):
+            draft_only_fields = {"transaction_type", "price_cycle"}
+            allowed_draft_fields = set(KNOWN_FIELDS) | draft_only_fields
+            if not isinstance(incoming_facts, dict) or any(key not in allowed_draft_fields for key in incoming_facts):
                 self.send_json({"error": "INTAKE_FACTS_INVALID"}, 400); return
             facts = dict(record.get("preliminaryFacts") or {})
             for key, value in incoming_facts.items():
