@@ -1609,7 +1609,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def create_content_from_intake(self, intake_id: str, payload: dict[str, Any]) -> None:
         """One explicit Owner action: reuse Intake/Review, then one private 5-output request."""
-        test_only = (os.environ.get("BMT_ENV") == "test" and os.environ.get("BMT_TEST_ONLY") == "1"
+        test_only = (os.environ.get("BMT_ENV") in {"test", "staging"} and os.environ.get("BMT_TEST_ONLY") == "1"
                      and _is_loopback_host(HOST) and bool(os.environ.get("SALA_E2E_ROOT"))
                      and Path(PRIVATE_ROOT).resolve().is_relative_to(Path(os.environ["SALA_E2E_ROOT"]).resolve()))
         owner_id = self.owner_id()

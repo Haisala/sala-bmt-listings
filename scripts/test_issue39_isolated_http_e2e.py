@@ -441,6 +441,10 @@ def child_env(root: Path, mode: str, port: int = 0, *, customer_port: int = 0, a
             "BMT_ADMIN_PASSWORD_FILE": str(root / "admin-owner-password"),
             "BMT_ADMIN_LOCAL_HTTP_DEV": "1",
             "BMT_ADMIN_SECURE_COOKIE": "1" if connected_admin_origin else "0",
+            # The child is a TEST_ONLY process behind the staging bearer proxy.
+            # Keep staging mode so Gate B routes are exercised; the narrowly
+            # scoped test-only predicate additionally requires loopback and an
+            # isolated SALA_E2E_ROOT before accepting synthetic intake data.
             "BMT_ENV": "staging" if connected_admin_origin else "test",
             "BMT_TEST_ONLY": "1",
             "BMT_OPENAI_EXTRACTION": "0",
@@ -567,6 +571,14 @@ def run_e2e() -> None:
     staging_namespace = staging_customer_namespace()
     if os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip() and staging_namespace is None:
         raise E2EFailure("CONNECTED_STAGING_NAMESPACES_REQUIRED")
+    configured_private_root = os.environ.get("ISSUE39_ADMIN_TEST_PRIVATE_ROOT", "").strip()
+    admin_private_root = Path(configured_private_root).expanduser() if configured_private_root else None
+    if os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip():
+        namespace_root = Path(os.environ["ISSUE39_STAGING_TEST_NAMESPACE_ROOT"]).expanduser().resolve(strict=True)
+        if (admin_private_root is None or admin_private_root.is_symlink()
+                or not admin_private_root.resolve(strict=True).is_relative_to(namespace_root)
+                or (admin_private_root.stat().st_mode & 0o077)):
+            raise E2EFailure("STAGING_ADMIN_PRIVATE_ROOT_NOT_ISOLATED")
     evidence["staging_customer_namespace_enabled"] = staging_namespace is not None
     source_hashes = {}
     for relative in ("admin/admin_server.py", "customer_web_v2/sala_web.py", "customer_web_v2/projection_reader.py", "customer_web_v2/public_contract.py"):
@@ -603,6 +615,8 @@ def run_e2e() -> None:
     temp = tempfile.TemporaryDirectory(prefix="sala-issue39-http-e2e-", dir=str(parent_path))
     root = Path(temp.name)
     root.chmod(0o700)
+    if admin_private_root is None:
+        admin_private_root = root / "admin-private"
     HTTPS_REQUEST_TEMP_ROOT = root
     tmp_root = root / "tmp"
     tmp_root.mkdir(mode=0o700)
@@ -685,7 +699,7 @@ def run_e2e() -> None:
 
         status, _, denied_test_route = json_call(admin_origin + "/api/ai9/test-only", method="POST",
                                                  headers={"Origin": admin_origin, "Content-Length": "0"})
-        check(status == 401, "anonymous_test_only_route_denied", evidence, f"HTTP {status}")
+        check(status in {401, 403}, "anonymous_test_only_route_denied", evidence, f"HTTP {status}")
 
         # Synthetic owner login for the real Admin HTTP handlers (not a second production account).
         admin_headers = {"Origin": admin_origin}
@@ -705,10 +719,31 @@ def run_e2e() -> None:
               and "TẠO CONTENT" in page_text and "/create-content" in page_text,
               "one_touch_content_ui_no_ai9_test_control", evidence)
         status, _, test_receipt = json_call(admin_origin + "/api/ai9/test-only", method="POST", headers={**admin_headers, "Content-Length": "0"})
+        evidence["test_only_route_receipt_summary"] = {
+            "http": status,
+            "published_false": test_receipt.get("published") is False if isinstance(test_receipt, dict) else False,
+            "mutated_property_store_false": test_receipt.get("mutated_property_store") is False if isinstance(test_receipt, dict) else False,
+            "cleanup_errors_count": len(test_receipt.get("cleanup_errors", [])) if isinstance(test_receipt, dict) else None,
+        }
         check(status == 200 and test_receipt.get("published") is False and test_receipt.get("mutated_property_store") is False,
               "authenticated_test_only_route_and_cleanup", evidence, f"HTTP {status}")
         status, _, after_cleanup_intakes = json_call(admin_origin + "/api/intakes", headers=admin_headers)
         status_reviews, _, after_cleanup_reviews = json_call(admin_origin + "/api/reviews", headers=admin_headers)
+        evidence["test_only_cleanup_summary"] = {
+            "intake_http": status, "intake_count": len(after_cleanup_intakes) if isinstance(after_cleanup_intakes, list) else None,
+            "remaining_rows_all_test_only": bool(after_cleanup_intakes) and isinstance(after_cleanup_intakes, list) and all(
+                isinstance(row, dict) and (row.get("source") == "TEST_ONLY" or row.get("sourceGroup") == "SYNTHETIC"
+                                           or "TEST_ONLY" in str(row.get("note", "")))
+                for row in after_cleanup_intakes
+            ),
+            "remaining_rows_test_only_flags": [
+                {"source_test_only": row.get("source") == "TEST_ONLY",
+                 "group_synthetic": row.get("sourceGroup") == "SYNTHETIC",
+                 "note_test_only": "TEST_ONLY" in str(row.get("note", ""))}
+                for row in after_cleanup_intakes if isinstance(row, dict)
+            ] if isinstance(after_cleanup_intakes, list) else [],
+            "review_http": status_reviews, "review_count": len(after_cleanup_reviews) if isinstance(after_cleanup_reviews, list) else None,
+        }
         check(status == 200 and after_cleanup_intakes == [] and status_reviews == 200 and after_cleanup_reviews == [],
               "test_only_route_leaves_no_intake_or_review", evidence)
 
@@ -820,7 +855,7 @@ def run_e2e() -> None:
               and len({x.get("storedFilename") for x in collision.get("media", [])}) == 2,
               "same_filename_distinct_bytes_preserved", evidence, f"HTTP {status}")
         for item, expected in zip(collision["media"], (collision_files[0][1], collision_files[1][1])):
-            check((root / "admin-private" / item["path"]).read_bytes() == expected,
+            check((admin_private_root / item["path"]).read_bytes() == expected,
                   "same_filename_media_bytes_not_overwritten", evidence)
         status, _, collision_cleanup = json_call(admin_origin + f"/api/intakes/{collision['id']}", method="DELETE",
                                                   obj=None, headers={**admin_headers, "X-Test-Fixture": "TEST_ONLY"})
@@ -884,7 +919,7 @@ def run_e2e() -> None:
 
         from property_memory import PropertyStore
         from property_memory.review_center import ReviewCenter
-        store = PropertyStore(root / "admin-private" / "property-core.sqlite3")
+        store = PropertyStore(admin_private_root / "property-core.sqlite3")
         gate_b_fixture = ReviewCenter(store)
         approved_package = gate_b_fixture.view(review_id)
         check(not approved_package.get("selected_content"), "web_publish_without_gate_b_content", evidence)
@@ -1002,33 +1037,37 @@ def run_e2e() -> None:
         publish_isolated_fixture_to_staging(staging_namespace, artifact_bytes, asset, property_id,
                                             listing["listing_id"], media_id, evidence)
 
-        # Real HTTP Customer -> relay -> Admin analytics, all events bound to the active publication.
-        traffic_events = [
-            {"event_id": str(uuid.uuid4()), "event_type": "page_view", "page_type": "listing_detail",
-             "property_id": property_id, "publication_id": publication_id, "utm_source": "qr", "utm_medium": "referral"},
-            {"event_id": str(uuid.uuid4()), "event_type": "property_detail_view",
-             "property_id": property_id, "publication_id": publication_id},
-        ]
-        for event in traffic_events:
-            status, _, receipt = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
-                                           headers={"Origin": customer_origin})
-            check(status == 202 and receipt == {"accepted": True, "duplicate": False},
-                  "customer_http_event_receipt", evidence, f"HTTP {status}")
-            status, _, replay = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
-                                          headers={"Origin": customer_origin})
-            check(status == 200 and replay == {"accepted": True, "duplicate": True},
-                  "customer_http_event_idempotent_replay", evidence, f"HTTP {status}")
-        invalid_event = {**traffic_events[1], "event_id": str(uuid.uuid4()), "publication_id": "publication-00000000000000000000000000000000"}
-        status, _, _ = json_call(customer_origin + "/api/analytics/events", method="POST", obj=invalid_event,
-                                 headers={"Origin": customer_origin})
-        check(status == 422, "customer_http_stale_publication_event_denied", evidence, f"HTTP {status}")
-        private_event = {**traffic_events[1], "event_id": str(uuid.uuid4()), "phone": "0901234567"}
-        status, _, _ = json_call(customer_origin + "/api/analytics/events", method="POST", obj=private_event,
-                                 headers={"Origin": customer_origin})
-        check(status == 422, "customer_http_private_event_field_denied", evidence, f"HTTP {status}")
-        report_day = datetime.now(timezone.utc).date().isoformat()
-        status, _, event_report = json_call(admin_origin + f"/api/analytics/report?from={report_day}&to={report_day}&property_id={property_id}", headers=admin_headers)
-        check(status == 200 and event_report.get("total_events") == 2, "admin_http_owner_event_report", evidence, f"HTTP {status}")
+        if STAGING_ADMIN_REWRITE is None:
+            # Local isolated runs exercise analytics relay. Connected projection
+            # E2E does not route analytics through the protected test proxy.
+            traffic_events = [
+                {"event_id": str(uuid.uuid4()), "event_type": "page_view", "page_type": "listing_detail",
+                 "property_id": property_id, "publication_id": publication_id, "utm_source": "qr", "utm_medium": "referral"},
+                {"event_id": str(uuid.uuid4()), "event_type": "property_detail_view",
+                 "property_id": property_id, "publication_id": publication_id},
+            ]
+            for event in traffic_events:
+                status, _, receipt = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
+                                               headers={"Origin": customer_origin})
+                check(status == 202 and receipt == {"accepted": True, "duplicate": False},
+                      "customer_http_event_receipt", evidence, f"HTTP {status}")
+                status, _, replay = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
+                                              headers={"Origin": customer_origin})
+                check(status == 200 and replay == {"accepted": True, "duplicate": True},
+                      "customer_http_event_idempotent_replay", evidence, f"HTTP {status}")
+            invalid_event = {**traffic_events[1], "event_id": str(uuid.uuid4()), "publication_id": "publication-00000000000000000000000000000000"}
+            status, _, _ = json_call(customer_origin + "/api/analytics/events", method="POST", obj=invalid_event,
+                                     headers={"Origin": customer_origin})
+            check(status == 422, "customer_http_stale_publication_event_denied", evidence, f"HTTP {status}")
+            private_event = {**traffic_events[1], "event_id": str(uuid.uuid4()), "phone": "0901234567"}
+            status, _, _ = json_call(customer_origin + "/api/analytics/events", method="POST", obj=private_event,
+                                     headers={"Origin": customer_origin})
+            check(status == 422, "customer_http_private_event_field_denied", evidence, f"HTTP {status}")
+            report_day = datetime.now(timezone.utc).date().isoformat()
+            status, _, event_report = json_call(admin_origin + f"/api/analytics/report?from={report_day}&to={report_day}&property_id={property_id}", headers=admin_headers)
+            check(status == 200 and event_report.get("total_events") == 2, "admin_http_owner_event_report", evidence, f"HTTP {status}")
+        else:
+            evidence["connected_https_analytics"] = "NOT_VERIFIED: analytics relay uses the local Admin test endpoint, outside the isolated staging projection proxy"
 
         # Replay cannot duplicate. Rejected rights/private DTOs disappear from public list/media.
         status, _, _ = json_call(admin_origin + f"/api/reviews/{review_id}/public-release/approve", method="POST",
@@ -1073,17 +1112,20 @@ def run_e2e() -> None:
               "customer_revoked_projection_empty", evidence)
         check(request(customer_origin + "/media/" + media_id)[0] == 404, "customer_revoked_media_hidden", evidence, "HTTP 404")
         revoke_isolated_fixture_from_staging(staging_namespace, listing["listing_id"], media_id, evidence)
-        status, _, revoked_event = json_call(customer_origin + "/api/analytics/events", method="POST",
-                                              obj={**traffic_events[1], "event_id": str(uuid.uuid4())},
-                                              headers={"Origin": customer_origin})
-        check(status == 422, "customer_http_revoked_publication_event_denied", evidence, f"HTTP {status}")
+        if STAGING_ADMIN_REWRITE is None:
+            status, _, revoked_event = json_call(customer_origin + "/api/analytics/events", method="POST",
+                                                  obj={**traffic_events[1], "event_id": str(uuid.uuid4())},
+                                                  headers={"Origin": customer_origin})
+            check(status == 422, "customer_http_revoked_publication_event_denied", evidence, f"HTTP {status}")
+            evidence["traffic_events"] = {"status": "PASS_HTTP", "accepted": 2, "replays": 2, "after_revoke": 422}
+        else:
+            evidence["connected_https_analytics_after_revoke"] = "NOT_VERIFIED: no authenticated staging analytics relay in the isolated Customer namespace"
 
         evidence["test_only_counts"] = {"admin_intakes": 1, "reviews": 1, "property_core": len(store.list_properties()),
                                         "admin_public_rows_after_revoke": len(json.loads(web_path.read_text(encoding="utf-8"))),
                                         "customer_legacy_property_rows": 0}
         evidence["fixture_sha256"] = hashlib.sha256(PNG).hexdigest()
         evidence["customer_contact"] = "NOT_CONFIGURED; disabled CTA emits no contact event"
-        evidence["traffic_events"] = {"status": "PASS_HTTP", "accepted": 2, "replays": 2, "after_revoke": 422}
         if STAGING_ADMIN_REWRITE is not None and STAGING_CUSTOMER_REWRITE is not None:
             evidence["connected_staging_https"] = {
                 "admin_host": "admin-next.haisala.io.vn",
