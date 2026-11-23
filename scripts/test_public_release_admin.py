@@ -68,8 +68,10 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="sala-public-release-") as folder:
         root = Path(folder)
         (root / "admin-private").mkdir(mode=0o700)
+        (root / "public-assets").mkdir(mode=0o700)
         os.environ["BMT_ADMIN_PRIVATE_ROOT"] = str(root / "admin-private")
         os.environ["BMT_ADMIN_PREVIEW_ROOT"] = str(root / "preview")
+        os.environ["BMT_ADMIN_PUBLIC_ASSETS_ROOT"] = str(root / "public-assets")
         os.environ["BMT_ADMIN_OWNER_ID"] = "owner-primary"
         os.environ["BMT_ADMIN_HOST"] = "127.0.0.1"
         os.environ["BMT_ADMIN_PORT"] = "43127"
@@ -96,8 +98,34 @@ def main() -> None:
         origin = f"http://127.0.0.1:{adm.PORT}"
 
         initial = adm._public_release_snapshot(center, review_id)
-        assert initial["state"] == "NOT_APPROVED" and initial["can_approve"] is True
+        assert initial["state"] == "NOT_APPROVED" and initial["can_approve"] is False
         assert initial["property_revision"] == 1 and initial["media_summary"] == {"active": 0, "eligible": 0, "blocked": 0}
+        assert "PUBLIC_MEDIA_REQUIRED" in initial["blockers"] and initial["confirmation_preview"] is None
+        import base64
+        preview_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWQ0AAAAASUVORK5CYII=")
+        media_ref = "assets/images/test-only-home/front.png"
+        media_path = root / "public-assets" / media_ref
+        media_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        media_path.write_bytes(preview_png)
+        appearance_id = store.list_source_appearances(property_id)[0]["appearance_id"]
+        store.append_media_observation(property_id, {"appearance_id": appearance_id, "media_ref": media_ref,
+                                      "rights_status": "PERSONAL", "active": True}, event_id="TEST_ONLY-confirm-preview-media")
+        store.add_rights(property_id, {"appearance_id": appearance_id, "rights_status": "PERSONAL",
+                                       "channel": "public_web", "approved": True}, rights_id="TEST_ONLY-preview-rights")
+        initial = adm._public_release_snapshot(center, review_id)
+        assert initial["can_approve"] is True and initial["media_summary"] == {"active": 1, "eligible": 1, "blocked": 0}
+        confirmation = initial["confirmation_preview"]
+        assert confirmation["propertyId"] == property_id and confirmation["propertyRevision"] == 1
+        assert confirmation["publicationId"] is None and confirmation["publicationStatus"] == "OWNER_CONFIRMATION_PENDING"
+        assert confirmation["legal"] == "CERTIFICATE" and confirmation["price"] == 1850000000
+        assert confirmation["description"] == (store.get(property_id).get("factual_description") or store.get(property_id)["title"])
+        assert "internal_analysis" not in confirmation and len(initial["confirmation_media"]) == 1
+        assert store.get(property_id)["property_revision"] == 1
+        saved_area = store.get(property_id)["area"]
+        store.update(property_id, {"area": None})
+        missing_area = adm._public_release_snapshot(center, review_id)
+        assert "PUBLIC_FACTS_INCOMPLETE" in missing_area["blockers"] and not missing_area["can_approve"]
+        store.update(property_id, {"area": saved_area})
 
         pending = process_intake(store, center, fake_intake("intake-test-only-pending"))
         pending_status = adm._public_release_snapshot(center, pending["review_id"])
@@ -123,6 +151,44 @@ def main() -> None:
         conflict = store.list_conflicts(property_id)[0]
         store.resolve_conflict(conflict["conflict_id"], "DISMISSED", "TEST_ONLY fixture resolved")
         assert adm._public_release_snapshot(center, review_id)["can_approve"]
+
+        # A selected Website Content revision must remain exact and needs approved public media.
+        package_record["selected_content"] = {
+            "content_batch_id": "batch-TEST_ONLY", "content_variant_id": "variant-TEST_ONLY",
+            "content_revision": 2, "facts_revision_id": f"facts-{property_id}-r1",
+            "property_id": property_id, "property_revision": 1, "status": "OWNER_APPROVED",
+            "title": "TEST_ONLY approved title", "body": "TEST_ONLY approved public description",
+            "channel_approval": {"channel": "public_web", "content_variant_id": "variant-TEST_ONLY",
+                                 "content_revision": 2, "status": "OWNER_APPROVED_DRAFT"},
+        }
+        center._persist(package_record)
+        with store.connection:
+            store.connection.execute("DELETE FROM rights_refs WHERE rights_id = ?", ("TEST_ONLY-preview-rights",))
+            store.connection.execute("DELETE FROM property_media_history WHERE event_id = ?", ("TEST_ONLY-confirm-preview-media",))
+        content_blocked = adm._public_release_snapshot(center, review_id)
+        assert "PUBLIC_MEDIA_REQUIRED" in content_blocked["blockers"]
+        assert "PUBLIC_CONTENT_MEDIA_REQUIRED" in content_blocked["blockers"] and not content_blocked["can_approve"]
+        assert content_blocked["confirmation_preview"] is None
+        store.append_media_observation(property_id, {"appearance_id": appearance_id, "media_ref": media_ref,
+                                      "rights_status": "PERSONAL", "active": True}, event_id="TEST_ONLY-confirm-preview-media")
+        store.add_rights(property_id, {"appearance_id": appearance_id, "rights_status": "PERSONAL",
+                                       "channel": "public_web", "approved": True}, rights_id="TEST_ONLY-preview-rights")
+        content_ready = adm._public_release_snapshot(center, review_id)
+        assert content_ready["can_approve"] and content_ready["confirmation_preview"]["description"] == "TEST_ONLY approved public description"
+        assert content_ready["confirmation_preview"]["contentVariantId"] == "variant-TEST_ONLY"
+        assert content_ready["confirmation_preview"]["images"] == [media_ref]
+        media_id = content_ready["confirmation_media"][0]["media_id"]
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/media/{media_id}", method="GET")
+        handler.do_GET()
+        assert response["status"] == 200 and handler.wfile.getvalue() == preview_png
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/media/{media_id}", method="GET", owner=None)
+        handler.do_GET()
+        assert response["status"] == 401
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/media/{'0' * 24}", method="GET")
+        handler.do_GET()
+        assert response["status"] == 404
+        package_record.pop("selected_content")
+        center._persist(package_record)
 
         handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
                                          payload={"property_id": property_id, "expected_review_revision": 1,
@@ -156,6 +222,13 @@ def main() -> None:
         property_count = len(store.list_properties())
         approval_payload = {"property_id": property_id, "expected_review_revision": 1,
                             "expected_property_revision": 1, "idempotency_key": "owner-release-test-001"}
+        changed_content_payload = {**approval_payload, "expected_content_variant_id": "stale-variant",
+                                   "expected_content_revision": 1, "idempotency_key": "stale-content-001"}
+        handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
+                                         payload=changed_content_payload, origin=origin)
+        handler.do_POST()
+        assert response["status"] == 409 and response["value"]["error"] == "STALE_PUBLIC_CONTENT_REVISION"
+        assert not package_record.get("public_release_decisions")
         handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
                                          payload=approval_payload, origin=origin)
         handler.do_POST()
@@ -229,6 +302,10 @@ def main() -> None:
         assert len(store.list_properties()) == property_count
 
         # Unknown media rights block any new public release and withdraw the isolated preview.
+        with store.connection:
+            store.connection.execute("DELETE FROM rights_refs WHERE rights_id = ?", ("TEST_ONLY-preview-rights",))
+            store.connection.execute("DELETE FROM property_media_history WHERE event_id = ?", ("TEST_ONLY-confirm-preview-media",))
+        media_path.unlink()
         appearance = store.list_source_appearances(property_id)[0]
         store.append_media_observation(property_id, {"appearance_id": appearance["appearance_id"],
                                       "media_ref": "inbox/TEST_ONLY/photo.jpg", "rights_status": "UNKNOWN", "active": True},
@@ -262,6 +339,16 @@ def main() -> None:
         second_id = second_approved["mutation_result"]["property_id"]
         second_record = center.packages[second_approved["review_id"]]
         assert not second_record.get("selected_content")
+        second_appearance = store.list_source_appearances(second_id)[0]["appearance_id"]
+        second_media_ref = "assets/images/test-only-rollback-home/front.png"
+        second_media_path = root / "public-assets" / second_media_ref
+        second_media_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        second_media_path.write_bytes(preview_png)
+        store.append_media_observation(second_id, {"appearance_id": second_appearance,
+                                      "media_ref": second_media_ref, "rights_status": "PERSONAL", "active": True},
+                                      event_id="TEST_ONLY-rollback-media")
+        store.add_rights(second_id, {"appearance_id": second_appearance, "rights_status": "PERSONAL",
+                                    "channel": "public_web", "approved": True}, rights_id="TEST_ONLY-rollback-rights")
         web_before = website_path.read_bytes()
         core_projection_before = canonical_path.read_bytes()
         real_writer = adm.write_staging_web_artifact
@@ -290,6 +377,12 @@ def main() -> None:
         assert "local-only" not in html_page and "AI9 TEST ONLY" not in html_page
         assert "Chạy AI9 TEST_ONLY" not in html_page and "TẠO CONTENT" in html_page
         assert "min-height:44px;flex:1 1 180px" in html_page and 'name="viewport"' in html_page
+        assert "expected_content_variant_id:selected.content_variant_id||null" in html_page
+        assert "XEM VÀ XÁC NHẬN ĐĂNG" in html_page and "XÁC NHẬN ĐĂNG" in html_page
+        assert "PUBLIC_MEDIA_REQUIRED" in html_page and "PUBLIC_FACTS_INCOMPLETE" in html_page
+        for channel in ("facebook", "zalo_company", "tiktok", "instagram", "youtube", "x", "linkedin"):
+            assert channel in html_page
+        assert "Quyền sử dụng: "+"'+item.rights_status" in html_page
         saved_test_env = {key: os.environ.get(key) for key in ("BMT_ENV", "BMT_TEST_ONLY", "SALA_E2E_ROOT", "BMT_ADMIN_PUBLIC_ORIGIN", "BMT_ADMIN_ALLOWED_IP")}
         saved_security = (adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP)
         adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP = True, "127.0.0.1"

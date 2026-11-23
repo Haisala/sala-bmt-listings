@@ -193,6 +193,33 @@ def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any], pu
     return dto
 
 
+def build_public_confirmation_preview(store: PropertyStore, property_id: str,
+                                      public_content: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build the exact public fields for Owner review without recording or writing a release."""
+    prop = store.get(property_id)
+    if prop is None:
+        raise ProjectionError("PROPERTY_NOT_FOUND")
+    revision = int(prop.get("property_revision") or 0)
+    if revision < 1:
+        raise ProjectionError("PROPERTY_REVISION_REQUIRED")
+    if public_content and (
+        public_content.get("status") != "OWNER_APPROVED"
+        or public_content.get("property_id") != property_id
+        or int(public_content.get("property_revision") or 0) != revision
+        or public_content.get("facts_revision_id") != f"facts-{property_id}-r{revision}"
+        or not all(isinstance(public_content.get(key), str) and public_content[key].strip()
+                   for key in ("content_batch_id", "content_variant_id", "title", "body"))
+        or int(public_content.get("content_revision") or 0) < 1
+    ):
+        raise ProjectionError("APPROVED_CONTENT_STALE_OR_INVALID")
+    dto = _dto(store, prop, {"publication_id": None, "at": None}, public_content)
+    dto.update({"publicationId": None, "publicationStatus": "OWNER_CONFIRMATION_PENDING",
+                "publicationRevision": None, "publicationApprovedAt": None})
+    if dto.get("legal") in (None, ""):
+        dto["legal"] = "UNKNOWN"
+    return dto
+
+
 def build_public_projection(store: PropertyStore, property_id: str, output_path: str | Path, *, public_content: dict[str, Any] | None = None, failure: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Atomically upsert one approved property into an isolated public fixture."""
     destination = Path(output_path).resolve()
