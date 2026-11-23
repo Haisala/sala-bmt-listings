@@ -291,8 +291,25 @@ def main() -> None:
         html_page = handler.wfile.getvalue().decode("utf-8")
         assert response["status"] == 200 and "Duyệt công bố riêng" in html_page
         assert "data-release-approve" in html_page and "data-release-revoke" in html_page
-        assert "content-studio" in html_page and "Tạo 3 mẫu bằng AI" in html_page
+        assert 'href="#intake-section"' in html_page and 'href="#review-section"' in html_page
+        assert "local-only" not in html_page and "AI9 TEST ONLY" not in html_page
+        assert "Chạy AI9 TEST_ONLY" not in html_page and "content-studio" not in html_page
         assert "min-height:44px;flex:1 1 180px" in html_page and 'name="viewport"' in html_page
+        saved_test_env = {key: os.environ.get(key) for key in ("BMT_ENV", "BMT_TEST_ONLY", "SALA_E2E_ROOT", "BMT_ADMIN_PUBLIC_ORIGIN", "BMT_ADMIN_ALLOWED_IP")}
+        saved_security = (adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP)
+        adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP = True, "127.0.0.1"
+        os.environ.update({"BMT_ENV": "staging", "BMT_TEST_ONLY": "1", "BMT_ADMIN_PUBLIC_ORIGIN": "https://admin.test", "BMT_ADMIN_ALLOWED_IP": "127.0.0.1"})
+        os.environ.pop("SALA_E2E_ROOT", None)
+        handler, response = make_handler(adm, "/api/ai9/test-only", method="POST", origin="https://admin.test")
+        handler.do_POST()
+        assert response["status"] == 404 and response["value"]["error"] == "TEST_ONLY_ROUTE_DISABLED", response
+        handler, response = make_handler(adm, "/api/ai9/test-only", method="POST", owner=None, origin="https://admin.test")
+        handler.do_POST()
+        assert response["status"] == 401
+        adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP = saved_security
+        for key, value in saved_test_env.items():
+            if value is None: os.environ.pop(key, None)
+            else: os.environ[key] = value
         assert store.get(property_id)["property_revision"] == 2
 
         # Owner-only media-rights promotion is staging-only, hash-checked, and idempotent.

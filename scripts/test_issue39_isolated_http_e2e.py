@@ -334,12 +334,30 @@ def run_e2e() -> None:
         customer_db = root / "customer-private" / "unused.sqlite3"
         check(not customer_db.exists() and not customer_db.parent.exists(), "customer_store_not_created", evidence)
 
+        status, _, denied_test_route = json_call(admin_origin + "/api/ai9/test-only", method="POST",
+                                                 headers={"Origin": admin_origin, "Content-Length": "0"})
+        check(status == 401, "anonymous_test_only_route_denied", evidence, f"HTTP {status}")
+
         # Synthetic owner login for the real Admin HTTP handlers (not a second production account).
         admin_headers = {"Origin": admin_origin}
         status, h, login = json_call(admin_origin + "/api/auth/login", method="POST", obj={"password": OWNER_PASSWORD}, headers=admin_headers)
         check(status == 200 and login.get("authenticated") is True, "admin_synthetic_login", evidence, f"HTTP {status}")
         admin_cookie = cookie_value(h.get("Set-Cookie", ""), "bmt_admin_session")
         admin_headers["Cookie"] = f"bmt_admin_session={admin_cookie}"
+
+        status, _, owner_page = request(admin_origin + "/", headers=admin_headers)
+        page_text = owner_page.decode("utf-8")
+        check(status == 200 and all(anchor in page_text for anchor in ("#intake-section", "#property-search", "#review-section", "#owner-analytics")),
+              "owner_mobile_navigation_present", evidence, f"HTTP {status}")
+        check("AI9 TEST ONLY" not in page_text and "Chạy AI9 TEST_ONLY" not in page_text and "local-only" not in page_text
+              and "content-studio" not in page_text, "owner_test_controls_and_content_phase_hidden", evidence)
+        status, _, test_receipt = json_call(admin_origin + "/api/ai9/test-only", method="POST", headers={**admin_headers, "Content-Length": "0"})
+        check(status == 200 and test_receipt.get("published") is False and test_receipt.get("mutated_property_store") is False,
+              "authenticated_test_only_route_and_cleanup", evidence, f"HTTP {status}")
+        status, _, after_cleanup_intakes = json_call(admin_origin + "/api/intakes", headers=admin_headers)
+        status_reviews, _, after_cleanup_reviews = json_call(admin_origin + "/api/reviews", headers=admin_headers)
+        check(status == 200 and after_cleanup_intakes == [] and status_reviews == 200 and after_cleanup_reviews == [],
+              "test_only_route_leaves_no_intake_or_review", evidence)
 
         # (a) no Gate A and (b) Gate A without Web publication both yield no Customer data.
         status, _, empty_before = request(customer_origin + "/api/listings")
@@ -382,32 +400,31 @@ def run_e2e() -> None:
         property_id = gate["mutation_result"]["property_id"]
         check(request(customer_origin + "/api/listings")[0] == 503, "gate_a_without_web_publish_customer_fail_closed", evidence, "HTTP 503")
 
-        status, _, content = json_call(admin_origin + f"/api/reviews/{review_id}/content/create", method="POST", obj={}, headers=admin_headers)
-        check(status == 201 and content.get("generation_mode") == "OFFLINE_RULE_BASED" and len(content.get("variants", [])) == 3 and content.get("published") is False,
-              "owner_content_create_three_private_drafts", evidence, f"HTTP {status}")
-        variant = content["variants"][0]
-        status, _, edited = json_call(admin_origin + f"/api/reviews/{review_id}/content/edit", method="POST",
-                                      obj={"content_variant_id": variant["content_variant_id"], "expected_content_revision": 1,
-                                           "title": "TEST_ONLY Owner selected title", "body": "TEST_ONLY Owner edited body."}, headers=admin_headers)
-        check(status == 200 and edited.get("content_revision") == 2 and edited.get("published") is False,
-              "owner_content_edit_revision", evidence, f"HTTP {status}")
-        content_variant_id = variant["content_variant_id"]
-        status, _, selected = json_call(admin_origin + f"/api/reviews/{review_id}/content/select", method="POST",
-                                        obj={"content_variant_id": content_variant_id, "expected_content_revision": 2}, headers=admin_headers)
-        check(status == 200 and selected.get("status") == "DRAFT", "owner_content_select_is_not_approval", evidence, f"HTTP {status}")
-        status, _, missing_evidence = json_call(admin_origin + f"/api/reviews/{review_id}/content/approve", method="POST",
-                                               obj={"content_variant_id": content_variant_id, "expected_content_revision": 2}, headers=admin_headers)
-        check(status == 422 and missing_evidence.get("error") == "RIGHTS_NOT_APPROVED", "gate_b_missing_evidence_fail_closed", evidence, f"HTTP {status}")
-        status, _, evidence_saved = json_call(admin_origin + f"/api/reviews/{review_id}/evidence", method="POST",
-                                              obj={"citations": [{"source_id": "TEST_ONLY-source-1", "claim": "TEST_ONLY Owner confirms source", "rights_status": "APPROVED"}], "rights_status": "APPROVED"}, headers=admin_headers)
-        check(status == 201, "owner_content_evidence_saved_test_only", evidence, f"HTTP {status} {evidence_saved.get('error', '')}")
-        status, _, content_approved = json_call(admin_origin + f"/api/reviews/{review_id}/content/approve", method="POST",
-                                                obj={"content_variant_id": content_variant_id, "expected_content_revision": 2}, headers=admin_headers)
-        check(status == 200 and content_approved.get("status") == "OWNER_APPROVED" and content_approved.get("published") is False,
-              "owner_gate_b_content_approval", evidence, f"HTTP {status}")
-
         from property_memory import PropertyStore
+        from property_memory.review_center import ReviewCenter
         store = PropertyStore(root / "admin-private" / "property-core.sqlite3")
+        gate_b_fixture = ReviewCenter(store)
+        approved_package = gate_b_fixture.view(review_id)
+        approved_package["selected_content"] = {
+            "content_batch_id": "content-batch-TEST_ONLY-http-e2e",
+            "content_variant_id": "content-variant-TEST_ONLY-http-e2e",
+            "content_revision": 1,
+            "facts_revision_id": f"facts-{property_id}-r1",
+            "property_id": property_id,
+            "property_revision": 1,
+            "title": "TEST_ONLY HTTP Home",
+            "body": "TEST_ONLY factual description",
+            "status": "OWNER_APPROVED",
+            "approved_by": "TEST_ONLY_OWNER",
+            "gate_b": {"status": "PASS", "fixture": "TEST_ONLY"},
+        }
+        gate_b_fixture._persist(approved_package)
+        evidence["gate_b"] = "TEST_ONLY approved package fixture; Content UI/API was not invoked"
+
+        status, _, content_denied = json_call(admin_origin + f"/api/reviews/{review_id}/content/create", method="POST", obj={}, headers=admin_headers)
+        check(status == 404 and content_denied.get("error") == "CONTENT_PHASE_DISABLED",
+              "content_phase_stays_dormant_without_ai_or_offline_generation", evidence, f"HTTP {status}")
+
         appearances = store.list_source_appearances(property_id)
         check(len(store.list_properties()) == 1 and len(appearances) == 1, "synthetic_property_core_singleton", evidence)
         appearance_id = appearances[0]["appearance_id"]
@@ -433,17 +450,16 @@ def run_e2e() -> None:
         status, _, publication = json_call(admin_origin + f"/api/reviews/{review_id}/public-release/approve", method="POST",
                                            obj=release_payload, headers=admin_headers)
         check(status == 201 and publication.get("published") is False and publication.get("preview_records") == 1,
-              "owner_web_publication_http_preview_only", evidence, f"HTTP {status}")
+              "owner_web_publication_http_preview_only", evidence, f"HTTP {status} {publication.get('error', '')} {publication.get('blockers', [])}")
         web_path = root / "tmp" / "admin-preview" / "data" / "listings.json"
         artifact_bytes = web_path.read_bytes()
         evidence["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
         rows = json.loads(artifact_bytes)
         check(len(rows) == 1 and rows[0]["propertyId"] == property_id and rows[0]["propertyRevision"] == 1,
               "admin_projection_artifact_lineage", evidence)
-        check(rows[0].get("contentVariantId") == content_variant_id and rows[0].get("contentRevision") == 2
-              and rows[0].get("title") == "TEST_ONLY Owner selected title"
-              and rows[0].get("description") == "TEST_ONLY Owner edited body.",
-              "approved_content_bound_to_projection", evidence)
+        check(rows[0].get("title") == "TEST_ONLY HTTP Home"
+              and rows[0].get("description") == "TEST_ONLY factual description",
+              "projection_uses_approved_property_facts", evidence)
         check(store.get(property_id) == core_before_publication and len(store.list_properties()) == count_before_publication,
               "property_core_unchanged_by_web_publication", evidence)
 
@@ -456,8 +472,8 @@ def run_e2e() -> None:
         listing = feed["items"][0]
         check(listing["property_id"] == property_id and listing["property_revision"] == 1 and listing["projection_id"] == rows[0]["projectionId"],
               "feed_identity_and_revision_linkage", evidence)
-        check(listing.get("content_variant_id") == content_variant_id and listing.get("title") == "TEST_ONLY Owner selected title"
-              and listing.get("description") == "TEST_ONLY Owner edited body.", "customer_reads_approved_content", evidence)
+        check(listing.get("title") == "TEST_ONLY HTTP Home"
+              and listing.get("description") == "TEST_ONLY factual description", "customer_reads_approved_property_facts", evidence)
         publication_id = listing["publication_id"]
         check(publication_id == rows[0]["publicationId"], "feed_publication_id_linkage", evidence)
         status, _, detail_raw = request(customer_origin + "/api/listings/" + listing["listing_id"])
@@ -477,8 +493,6 @@ def run_e2e() -> None:
              "property_id": property_id, "publication_id": publication_id, "utm_source": "qr", "utm_medium": "referral"},
             {"event_id": str(uuid.uuid4()), "event_type": "property_detail_view",
              "property_id": property_id, "publication_id": publication_id},
-            {"event_id": str(uuid.uuid4()), "event_type": "contact_cta_click",
-             "property_id": property_id, "publication_id": publication_id, "channel": "other"},
         ]
         for event in traffic_events:
             status, _, receipt = json_call(customer_origin + "/api/analytics/events", method="POST", obj=event,
@@ -499,7 +513,7 @@ def run_e2e() -> None:
         check(status == 422, "customer_http_private_event_field_denied", evidence, f"HTTP {status}")
         report_day = datetime.now(timezone.utc).date().isoformat()
         status, _, event_report = json_call(admin_origin + f"/api/analytics/report?from={report_day}&to={report_day}&property_id={property_id}", headers=admin_headers)
-        check(status == 200 and event_report.get("total_events") == 3, "admin_http_owner_event_report", evidence, f"HTTP {status}")
+        check(status == 200 and event_report.get("total_events") == 2, "admin_http_owner_event_report", evidence, f"HTTP {status}")
 
         # Replay cannot duplicate. Rejected rights/private DTOs disappear from public list/media.
         status, _, _ = json_call(admin_origin + f"/api/reviews/{review_id}/public-release/approve", method="POST",
@@ -552,7 +566,8 @@ def run_e2e() -> None:
                                         "admin_public_rows_after_revoke": len(json.loads(web_path.read_text(encoding="utf-8"))),
                                         "customer_legacy_property_rows": 0}
         evidence["fixture_sha256"] = hashlib.sha256(PNG).hexdigest()
-        evidence["traffic_cta_events"] = {"status": "PASS_HTTP", "accepted": 3, "replays": 3, "after_revoke": 422}
+        evidence["customer_contact"] = "NOT_CONFIGURED; disabled CTA emits no contact event"
+        evidence["traffic_events"] = {"status": "PASS_HTTP", "accepted": 2, "replays": 2, "after_revoke": 422}
         evidence["status"] = "ISOLATED_HTTP_E2E_PASS"
     except Exception as exc:
         evidence["status"] = "ISOLATED_HTTP_E2E_PARTIAL"

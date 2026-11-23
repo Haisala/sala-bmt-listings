@@ -1062,11 +1062,10 @@ CONTENT_STUDIO_UI = '''<script>
 
 
 def page() -> bytes:
-    return """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BMT Property Hub — Kho nguồn hàng cá nhân</title><style>
-:root{font-family:system-ui,sans-serif;color:#15243a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}header{background:#0f2d5b;color:#fff;padding:18px 20px}main{max-width:900px;margin:auto;padding:18px 16px 60px}.grid{display:grid;gap:16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 8px 20px #0f2d5b0c}.kicker{font-size:.72rem;letter-spacing:.12em;font-weight:800;color:#2563eb}h1,h2{margin:0 0 10px}label{display:block;font-weight:700;font-size:.9rem;margin:10px 0 5px}input,textarea,select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}textarea{min-height:90px}button{border:0;border-radius:10px;padding:11px 15px;background:#0f2d5b;color:#fff;font:inherit;font-weight:800;cursor:pointer}.secondary{background:#e8effd;color:#2563eb}.row{display:flex;gap:8px;flex-wrap:wrap}.muted{color:#64748b;font-size:.9rem}.status{display:inline-block;border-radius:999px;padding:4px 9px;background:#e8effd;color:#2563eb;font-size:.75rem;font-weight:800}.item{border-top:1px solid #e5e7eb;padding-top:12px;margin-top:12px}.result{padding:10px 0;border-bottom:1px solid #e5e7eb}.ok{color:#07845e}.err{color:#b91c1c;white-space:pre-wrap}@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
-</style></head><body><header><strong>Hải Sala - BĐS</strong><div>Kho nguồn hàng cá nhân · local-only</div></header><main><section id="ai9-static" class="card"><p class="kicker">AI9 TEST ONLY</p><h2>Kiểm thử fixture tổng hợp</h2><p class="muted">Chỉ dữ liệu giả; hệ thống sẽ tự dọn sau khi preview.</p><form method="post" action="/api/ai9/test-only"><button type="submit" class="secondary">Chạy AI9 TEST_ONLY</button></form><pre id="ai9-static-result" class="muted"></pre></section><section class="card"><p class="kicker">INTAKE</p><h1>Nhận nguồn mới</h1><p class="muted">Bản gốc được lưu ngoài public root. V1 chưa ghi vào Property Core và chưa gửi ra kênh nào.</p><form id="intake" enctype="multipart/form-data"><label>Nguồn</label><select name="source"><option>Cá nhân</option><option>Zalo công ty</option><option>Khác</option></select><label>Nhóm/nguồn chi tiết</label><input name="sourceGroup" placeholder="Tên nhóm hoặc người cung cấp (nếu có)"><label>Thông tin sơ bộ</label><textarea name="note" placeholder="Giá, khu vực, pháp lý... chỉ ghi điều nguồn cung cấp"></textarea><label>Ảnh, video, ghi âm hoặc file gốc</label><input name="media" type="file" multiple accept="image/*,video/*,audio/*,.txt,.json,.md"><br><br><button type="submit">Lưu intake</button></form><p id="intake-msg"></p></section><section class="card"><p class="kicker">SEARCH</p><h2>Tra cứu listing thật</h2><form id="search"><input name="q" placeholder="Ví dụ: Thôn 8 sổ riêng 2 tỷ"><br><br><button class="secondary" type="submit">Tìm trong Property Core</button></form><div id="results"></div></section><section class="card"><p class="kicker">REVIEW CENTER · PRIVATE</p><h2>Hàng chờ duyệt Gate A</h2><p class="muted">Phân tích nội bộ chỉ dành cho Admin. Sửa thông tin quan trọng sẽ làm review thành STALE_REVIEW và phải tạo lại phân tích.</p><div id="reviews" class="muted">Đang tải...</div><div id="review-detail"></div></section><section class="card"><p class="kicker">QUEUE</p><h2>Approval Queue</h2><div id="queue" class="muted">Đang tải...</div></section></main><script>
+    return """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SALA BĐS · First Web Admin</title><style>
+:root{font-family:system-ui,sans-serif;color:#15243a;background:#f8fafc}*{box-sizing:border-box}body{margin:0}header{background:#0f2d5b;color:#fff;padding:18px 20px}main{max-width:900px;margin:auto;padding:18px 16px 60px}.grid{display:grid;gap:16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 8px 20px #0f2d5b0c}.kicker{font-size:.72rem;letter-spacing:.12em;font-weight:800;color:#2563eb}h1,h2{margin:0 0 10px}label{display:block;font-weight:700;font-size:.9rem;margin:10px 0 5px}input,textarea,select{width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}textarea{min-height:90px}button{border:0;border-radius:10px;padding:11px 15px;background:#0f2d5b;color:#fff;font:inherit;font-weight:800;cursor:pointer}.secondary{background:#e8effd;color:#2563eb}.row{display:flex;gap:8px;flex-wrap:wrap}.muted{color:#64748b;font-size:.9rem}.status{display:inline-block;border-radius:999px;padding:4px 9px;background:#e8effd;color:#2563eb;font-size:.75rem;font-weight:800}.item{border-top:1px solid #e5e7eb;padding-top:12px;margin-top:12px}.result{padding:10px 0;border-bottom:1px solid #e5e7eb}.ok{color:#07845e}.err{color:#b91c1c;white-space:pre-wrap}.owner-nav{position:sticky;top:0;z-index:10;display:flex;gap:8px;overflow-x:auto;padding:10px 12px;background:#fff;border-bottom:1px solid #dbe3ee}.owner-nav a{flex:0 0 auto;padding:9px 12px;border-radius:999px;background:#e8effd;color:#0f2d5b;font-weight:750;text-decoration:none;min-height:42px;display:flex;align-items:center}.owner-nav a:focus-visible{outline:3px solid #2563eb;outline-offset:2px}@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}.owner-nav{justify-content:center}}
+</style></head><body><header id="owner-home"><strong>SALA - BĐS</strong><div>First Web · Admin Staging</div></header><nav class="owner-nav" aria-label="Điều hướng Admin"><a href="#owner-home">Trang chủ</a><a href="#intake-section">Nhập nguồn</a><a href="#property-search">Property Core</a><a href="#review-section">Review / Gate A</a><a href="#owner-analytics">Web publish &amp; Traffic</a></nav><main><section id="intake-section" class="card"><p class="kicker">INTAKE</p><h1>Nhận nguồn mới</h1><p class="muted">Bản gốc lưu ngoài public root. Intake vào Property Core sau xử lý và Gate A; Website publish là quyết định riêng.</p><form id="intake" enctype="multipart/form-data"><label>Nguồn</label><select name="source"><option>Cá nhân</option><option>Zalo công ty</option><option>Khác</option></select><label>Nhóm/nguồn chi tiết</label><input name="sourceGroup" placeholder="Tên nhóm hoặc người cung cấp (nếu có)"><label>Thông tin sơ bộ</label><textarea name="note" placeholder="Giá, khu vực, pháp lý... chỉ ghi điều nguồn cung cấp"></textarea><label>Ảnh, video, ghi âm hoặc file gốc</label><input name="media" type="file" multiple accept="image/*,video/*,audio/*,.txt,.json,.md"><br><br><button type="submit">Lưu intake</button></form><p id="intake-msg"></p></section><section id="property-search" class="card"><p class="kicker">PROPERTY CORE</p><h2>Tra cứu listing thật</h2><form id="search"><input name="q" placeholder="Ví dụ: Thôn 8 sổ riêng 2 tỷ"><br><br><button class="secondary" type="submit">Tìm trong Property Core</button></form><div id="results"></div></section><section id="review-section" class="card"><p class="kicker">REVIEW CENTER · PRIVATE</p><h2>Hàng chờ duyệt Gate A</h2><p class="muted">Phân tích nội bộ chỉ dành cho Admin. Sửa thông tin quan trọng sẽ làm review thành STALE_REVIEW và phải tạo lại phân tích.</p><div id="reviews" class="muted">Đang tải...</div><div id="review-detail"></div></section><section class="card"><p class="kicker">QUEUE</p><h2>Approval Queue</h2><div id="queue" class="muted">Đang tải...</div></section></main><script>
 const $=s=>document.querySelector(s);const mojibake={'C�� nh��n':'Cá nhân','C�� nh��n':'Cá nhân','Zalo c��ng ty':'Zalo công ty','Kh��c':'Khác'};const displayText=s=>{const v=String(s??'');return mojibake[v]||(/[�]/.test(v)?'Nội dung tiếng Việt đã lưu':v);};const esc=s=>String(displayText(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const testCard=document.createElement('section');testCard.className='card';testCard.innerHTML='<p class="kicker">AI9 TEST ONLY</p><h2>Kiểm thử fixture tổng hợp</h2><p class="muted">Chỉ dữ liệu giả; hệ thống sẽ tự dọn sau khi preview.</p><button id="run-ai9-test" class="secondary">Chạy AI9 TEST_ONLY</button><pre id="ai9-test-result" class="muted"></pre>';document.querySelector('main').prepend(testCard);$('#run-ai9-test').onclick=async()=>{const out=$('#ai9-test-result'),form=new FormData();form.set('source','TEST_ONLY');form.set('sourceGroup','SYNTHETIC');form.set('note','TEST_ONLY synthetic AI9 fixture — không phải dữ liệu thật');out.textContent='Đang tạo fixture...';try{let r=await fetch('/api/intakes',{method:'POST',body:form}),d=await r.json();if(!r.ok)throw Error(d.error||'INTAKE_FAILED');const intakeId=d.id;out.textContent='Đang process '+intakeId+'...';r=await fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/process',{method:'POST'});d=await r.json();if(!r.ok)throw Error(d.error||'PROCESS_FAILED');const reviewId=d.review_id;out.textContent='Đang chạy AI9 Preview '+reviewId+'...';r=await fetch('/api/ai9/preview/'+encodeURIComponent(reviewId));const preview=await r.json();const receipt={response_status:r.status,review_id:reviewId,layers:Object.fromEntries(Object.entries(preview.layers||{}).map(([k,v])=>[k,v?.status||null])),errors:preview.errors||[],mutated_property_store:preview.mutated_property_store,published:preview.published};out.textContent=JSON.stringify(receipt,null,2);await fetch('/api/intakes/'+encodeURIComponent(intakeId),{method:'DELETE',headers:{'X-Test-Fixture':'TEST_ONLY'}});out.textContent+= '\\nCLEANUP: DONE';}catch(e){out.textContent='TEST_ONLY FAILED: '+e.message}finally{if(intakeId){const cleanup=await fetch('/api/intakes/'+encodeURIComponent(intakeId),{method:'DELETE',headers:{'X-Test-Fixture':'TEST_ONLY'}});out.textContent+='\nCLEANUP: '+(cleanup.ok?'DONE':'FAILED HTTP '+cleanup.status)}}};
 async function loadReviews(){const r=await fetch('/api/reviews');const d=await r.json();if(!r.ok){$('#reviews').textContent=d.error||'Không tải được review';return}$('#reviews').innerHTML=d.length?d.map(x=>`<div class="item"><button class="secondary" data-review="${esc(x.review_id)}">Mở</button> <b>${esc(x.state)}</b> · ${esc(x.source||'')} · ${esc(x.intake_id||'')} · revision ${x.review_revision}</div>`).join(''):'Chưa có review.';document.querySelectorAll('[data-review]').forEach(b=>b.onclick=()=>loadReview(b.dataset.review))}
 async function loadReview(id){const r=await fetch('/api/reviews/'+encodeURIComponent(id));const x=await r.json();if(!r.ok){$('#review-detail').textContent=x.error;return}const ia=x.internal_analysis||{},ds=ia.deal_score||{};$('#review-detail').innerHTML=`<div class="item"><h3>${esc(x.state)} · revision ${x.review_revision}</h3><h4>Nguồn / provenance</h4><pre>${esc(JSON.stringify(x.candidate?.raw||x.candidate?.provenance||{},null,2))}</pre><h4>Property facts</h4><pre>${esc(JSON.stringify(x.candidate?.facts||{},null,2))}</pre><h4>Thiếu / chưa Owner xác nhận</h4><pre>${esc(JSON.stringify(x.candidate?.missing_fields||[],null,2))}</pre><h4>Market / Comparable / Valuation</h4><pre>${esc(JSON.stringify({snapshot:x.market_snapshot?.market_snapshot_id,comparables:x.comparable_set?.status,valuation:x.valuation?.valuation_summary||x.valuation},null,2))}</pre><h4>AI Internal Analysis · PRIVATE</h4><pre>${esc(JSON.stringify({score:ds, strengths:ia.strengths, risks:ia.weaknesses_risks, anomalies:ia.anomalies, missing:ia.missing_information, questions:ia.questions_to_verify, recommendation:ia.recommended_action, confidence:ia.confidence},null,2))}</pre><p class="err">${x.state==='STALE_REVIEW'?'Phân tích đã cũ; không thể duyệt.':''}</p><label>Sửa field</label><input id="review-field" placeholder="ví dụ transaction_type, price_vnd_per_month, house_type, bedrooms"><input id="review-value" placeholder="Giá trị mới"><button data-edit-review>SAVE REVIEW REVISION</button> <button data-approve-review ${x.state==='STALE_REVIEW'||x.state==='REJECTED'?'disabled':''}>DUYỆT GATE A</button> <button data-reject-review>BỎ / TỪ CHỐI</button><p id="review-msg"></p></div>`;document.querySelector('[data-edit-review]').onclick=()=>reviewAction(id,'edit',x.review_revision,{field:$('#review-field').value,value:$('#review-value').value,owner_id:'owner'});document.querySelector('[data-approve-review]').onclick=()=>reviewAction(id,'approve',x.review_revision,{decision:'CREATE_NEW_PROPERTY',idempotency_key:'ui:'+id+':'+x.review_revision,owner_id:'owner'});document.querySelector('[data-reject-review]').onclick=()=>reviewAction(id,'reject',x.review_revision,{reason:'Owner rejected',owner_id:'owner'})}
 async function reviewAction(id,kind,revision,extra){const r=await fetch('/api/reviews/'+id+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:revision,...extra})});const d=await r.json();const gateErrors={MISSING_FIELDS_REQUIRE_OWNER:'Cần Owner bổ sung/xác nhận trường bắt buộc theo loại BĐS.',PROPERTY_TYPE_UNSUPPORTED:'Loại BĐS chưa có quy tắc Gate A.',RENT_PERIOD_NOT_SUPPORTED_BY_PROPERTY_CORE:'Property Core hiện chỉ lưu được giá thuê theo tháng; kỳ hạn này chưa thể duyệt.',SALE_PRICE_PERIOD_INVALID:'Giá bán không nhận chu kỳ thuê.'};$('#review-msg').textContent=r.ok?'Đã cập nhật: '+(d.state||'OK'):(gateErrors[d.error]||d.error||'Lỗi');loadReviews();if(r.ok)loadReview(id)}
@@ -1688,6 +1687,8 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError: self.send_json({"error": "INVALID_REVIEW_JSON"}, 400); return True
         content_match = re.fullmatch(r"/api/reviews/(review-[a-f0-9]+)/content/(create|edit|select|approve)", path)
         if content_match:
+            if not _CONTENT_LIVE_ENABLED:
+                self.send_json({"error": "CONTENT_PHASE_DISABLED"}, 404); return True
             if not isinstance(payload, dict):
                 self.send_json({"error": "CONTENT_REQUEST_INVALID"}, 400); return True
             self.content_route_post(content_match.group(1), content_match.group(2), payload)
@@ -1778,9 +1779,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Location", "/login")
                 self.end_headers()
                 return
-            body = page().replace(b'<section id="ai9-static" class="card">', b'<section id="ai9-static" class="card" hidden>', 1)
+            body = page()
             body = body.replace(b"</main><script>", ANALYTICS_CARD + b"</main><script>", 1)
-            body = body.replace(b'</script></body></html>', b'</script>' + PUBLIC_RELEASE_UI + CONTENT_STUDIO_UI + ANALYTICS_UI + b'</body></html>', 1)
+            body = body.replace(b'</script></body></html>', b'</script>' + PUBLIC_RELEASE_UI + ANALYTICS_UI + b'</body></html>', 1)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1932,6 +1933,8 @@ class Handler(BaseHTTPRequestHandler):
         if copy_studio_match:
             if not self.require_auth():
                 return
+            if not _CONTENT_LIVE_ENABLED:
+                self.send_json({"error": "CONTENT_PHASE_DISABLED"}, 404); return
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1947,6 +1950,8 @@ class Handler(BaseHTTPRequestHandler):
         if content_generate_match:
             if not self.require_auth():
                 return
+            if not _CONTENT_LIVE_ENABLED:
+                self.send_json({"error": "CONTENT_PHASE_DISABLED"}, 404); return
             if raw:
                 try:
                     payload = json.loads(raw.decode("utf-8"))
@@ -1959,11 +1964,25 @@ class Handler(BaseHTTPRequestHandler):
             self.content_batch_generate(content_generate_match.group(1))
             return
         if path == "/api/ai9/test-only":
+            if not self.require_auth():
+                return
+            test_root_value = os.environ.get("SALA_E2E_ROOT", "")
+            test_root = Path(test_root_value).resolve() if test_root_value else None
+            test_only_enabled = (
+                os.environ.get("BMT_ENV") == "test"
+                and os.environ.get("BMT_TEST_ONLY") == "1"
+                and _is_loopback_host(HOST)
+                and test_root is not None
+                and Path(PRIVATE_ROOT).resolve().is_relative_to(test_root)
+            )
+            if not test_only_enabled:
+                self.send_json({"error": "TEST_ONLY_ROUTE_DISABLED"}, 404); return
             center = self.review_center_or_error()
             if center is None:
                 return
             fixture = {"source": "TEST_ONLY", "sourceGroup": "SYNTHETIC", "note": "TEST_ONLY synthetic AI9 fixture"}
             record = None
+            cleanup_errors = []
             try:
                 record, _ = create_intake_record(fixture, [], supplied_key="ai9-server-test-only:" + uuid.uuid4().hex, client_batch_id=None)
                 package = process_intake(center.store, center, record, ai_gateway=AI_GATEWAY, operation_id="ai9-test-only")
@@ -1979,12 +1998,19 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         center.remove_test_only(record["id"])
                     except Exception:
-                        pass
-                    items = load_index()
-                    save_index([x for x in items if x.get("id") != record["id"]])
-                    folder = INBOX_ROOT / record["id"]
-                    if folder.exists() and folder.parent == INBOX_ROOT:
-                        shutil.rmtree(folder)
+                        cleanup_errors.append("REVIEW_CLEANUP_FAILED")
+                    try:
+                        remove_index_record(record["id"])
+                    except Exception:
+                        cleanup_errors.append("INTAKE_INDEX_CLEANUP_FAILED")
+                    try:
+                        folder = (INBOX_ROOT / record["id"]).resolve()
+                        if folder.parent == INBOX_ROOT.resolve() and folder.exists():
+                            shutil.rmtree(folder)
+                    except Exception:
+                        cleanup_errors.append("INTAKE_FILES_CLEANUP_FAILED")
+            if cleanup_errors:
+                self.send_json({"error": "TEST_ONLY_CLEANUP_INCOMPLETE", "cleanup_errors": cleanup_errors}, 500); return
             self.send_json(receipt, 200); return
         if path == "/api/auth/login":
             correlation = AUTH_CORRELATION.record("auth_entry", path, 0, "request_received")
