@@ -6,6 +6,7 @@ from hashlib import sha256
 import re
 from typing import Any
 from .usage_ledger import official_pricing_catalog
+from .providers.openai_provider import CONTENT_NORMALIZED_FACT_FIELDS
 
 
 def _now() -> str:
@@ -24,7 +25,8 @@ CONTENT_BATCH_OUTPUT_COUNT = 5
 
 def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any], provenance: dict[str, Any], rights_status: str | None,
                                    media: list[dict[str, Any]] | None, provider: Any | None, model: str,
-                                   usage_sink: Any | None = None) -> dict[str, Any]:
+                                   usage_sink: Any | None = None, review_id: str | None = None,
+                                   source_text: str = "") -> dict[str, Any]:
     """One injected provider call producing one private five-output Content batch."""
     if provider is None:
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_MODEL_NOT_CONFIGURED"], "published": False, "variants": []}
@@ -32,18 +34,27 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_INPUT_INVALID"], "published": False, "variants": []}
     if rights_status not in {"COMPANY", "PERSONAL", "APPROVED"}:
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_RIGHTS_REQUIRED"], "published": False, "variants": []}
+    if not isinstance(source_text, str) or len(source_text) > 320:
+        return {"status": "BLOCKED", "reason_codes": ["CONTENT_SOURCE_LIMIT_INVALID"], "published": False, "variants": []}
     payload = {"generation_id": generation_id, "model": model, "facts": {k: v for k, v in facts.items() if v not in (None, "")},
-               "provenance": provenance, "rights_status": rights_status, "media": media or [], "output_count": CONTENT_BATCH_OUTPUT_COUNT,
+               "provenance": provenance, "rights_status": rights_status, "media": [], "media_analysis": "NOT_SENT",
+               "source_text": source_text, "output_count": CONTENT_BATCH_OUTPUT_COUNT,
                "output_schema": "exactly_five_content_variants"}
     seed = f"{generation_id}:{model}:content-batch-v1"
     receipt_id = _id("content-receipt", seed)
     provider_name = getattr(provider, "provider_name", "injected")
 
-    def record_attempt(*, outcome: str, usage: dict[str, Any] | None, request_id: str | None) -> None:
-        if usage_sink is not None:
-            usage_sink.record(receipt_id=receipt_id, intake_id=provenance.get("intake_id"), stage="content_generation",
-                              operation="content_processor.generate", provider=provider_name, model=model, outcome=outcome,
-                              usage=usage, provider_request_id=request_id, idempotency_key=generation_id, ai_run_id=generation_id)
+    def record_attempt(*, outcome: str, usage: dict[str, Any] | None, request_id: str | None) -> dict[str, Any] | None:
+        if usage_sink is None:
+            return None
+        try:
+            return usage_sink.record(receipt_id=receipt_id, intake_id=provenance.get("intake_id"), review_id=review_id,
+                                     stage="content_generation", operation="content_processor.generate", provider=provider_name,
+                                     model=model, outcome=outcome, usage=usage, provider_request_id=request_id,
+                                     idempotency_key=generation_id, ai_run_id=generation_id,
+                                     pricing=official_pricing_catalog().get(model))
+        except Exception:
+            return None
 
     try:
         response = provider.generate(payload)
@@ -51,36 +62,75 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         record_attempt(outcome="FAILED", usage=None, request_id=None)
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_PROVIDER_ERROR", type(exc).__name__], "published": False, "variants": []}
     variants = response.get("variants") if isinstance(response, dict) else None
+    normalized_facts = response.get("normalized_facts") if isinstance(response, dict) else None
+    missing_fields = response.get("missing_fields") if isinstance(response, dict) else None
+    conflicts = response.get("conflicts") if isinstance(response, dict) else None
     response_usage = response.get("usage") if isinstance(response, dict) and isinstance(response.get("usage"), dict) else None
     response_request_id = response.get("provider_request_id") if isinstance(response, dict) and isinstance(response.get("provider_request_id"), str) else None
-    if not isinstance(variants, list) or len(variants) != CONTENT_BATCH_OUTPUT_COUNT:
+    if (not isinstance(variants, list) or len(variants) != CONTENT_BATCH_OUTPUT_COUNT
+            or not isinstance(normalized_facts, list) or not isinstance(missing_fields, list)
+            or not isinstance(conflicts, list)):
         record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_SCHEMA_INVALID"], "published": False, "variants": []}
     allowed = {k for k, v in facts.items() if v not in (None, "")}
+    normalized_keys: set[str] = set()
+    for item in normalized_facts:
+        if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("field", "raw_value", "normalized_value", "evidence")):
+            record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
+            return {"status": "BLOCKED", "reason_codes": ["CONTENT_FACTS_SCHEMA_INVALID"], "published": False, "variants": []}
+        field = item["field"]
+        evidence = item["evidence"].strip()
+        if field not in CONTENT_NORMALIZED_FACT_FIELDS or field in normalized_keys or not evidence or evidence not in source_text:
+            record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
+            return {"status": "BLOCKED", "reason_codes": ["CONTENT_FACTS_EVIDENCE_INVALID"], "published": False, "variants": []}
+        normalized_keys.add(field)
+        if field in facts and facts[field] not in (None, "") and str(facts[field]).strip() != item["normalized_value"].strip():
+            conflicts.append(field)
+    if conflicts:
+        record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
+        return {"status": "BLOCKED", "reason_codes": ["CONTENT_SOURCE_CONFLICT"], "published": False, "variants": [],
+                "normalized_facts": normalized_facts, "conflicts": sorted(set(str(x) for x in conflicts))}
+    allowed.update(normalized_keys)
     bodies = []
     for item in variants:
         if not isinstance(item, dict) or not isinstance(item.get("body"), str) or not item["body"].strip():
             record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
             return {"status": "BLOCKED", "reason_codes": ["CONTENT_SCHEMA_INVALID"], "published": False, "variants": []}
-        if not isinstance(item.get("facts_used"), list) or not set(item["facts_used"]).issubset(allowed):
+        if not isinstance(item.get("facts_used"), list) or not all(isinstance(value, str) for value in item["facts_used"]) or not set(item["facts_used"]).issubset(allowed):
             record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
             return {"status": "BLOCKED", "reason_codes": ["CONTENT_FACTS_UNGROUNDED"], "published": False, "variants": []}
         if not all(isinstance(item.get(k), list) for k in ("citations_used", "unknowns", "warnings")):
             record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
             return {"status": "BLOCKED", "reason_codes": ["CONTENT_METADATA_INVALID"], "published": False, "variants": []}
         bodies.append(item["body"])
+    indices = [item.get("variant_index") for item in variants]
+    if any(type(index) is not int for index in indices) or sorted(indices) != list(range(1, CONTENT_BATCH_OUTPUT_COUNT + 1)):
+        record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
+        return {"status": "BLOCKED", "reason_codes": ["CONTENT_VARIANT_INDEX_INVALID"], "published": False, "variants": []}
     if len(set(bodies)) != CONTENT_BATCH_OUTPUT_COUNT:
         record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_NOT_DISTINCT"], "published": False, "variants": []}
     batch_id = _id("content-batch", seed)
     usage = response_usage
     request_id = response_request_id
-    record_attempt(outcome="SUCCEEDED", usage=usage, request_id=request_id)
+    usage_receipt = record_attempt(outcome="SUCCEEDED", usage=usage, request_id=request_id)
+    if usage_receipt is None:
+        return {"status": "BLOCKED", "reason_codes": ["USAGE_RECEIPT_WRITE_FAILED"], "published": False, "variants": []}
     output = []
     for index, item in enumerate(variants, 1):
         output.append({**item, "content_variant_id": _id("content-variant", f"{seed}:{index}"), "variant_index": index, "status": "DRAFT", "visibility": "INTERNAL_ONLY", "generation_id": generation_id, "model": model, "content_batch_id": batch_id, "receipt_id": receipt_id})
-    receipt = {"receipt_id": receipt_id, "generation_id": generation_id, "provider": provider_name, "model": model, "request_id": request_id, "usage": usage, "usage_status": "PROVIDER_RETURNED_USAGE" if usage is not None else "USAGE_UNAVAILABLE", "cost_status": "ESTIMATE_ONLY", "content_batch_id": batch_id, "content_variant_ids": [x["content_variant_id"] for x in output]}
-    return {"status": "PASS", "generation_id": generation_id, "content_batch_id": batch_id, "content_variant_ids": receipt["content_variant_ids"], "variants": output, "receipt": receipt, "published": False, "mutated_property_store": False}
+    tokens = usage_receipt.get("tokens") if isinstance(usage_receipt.get("tokens"), dict) else {}
+    receipt = {"receipt_id": receipt_id, "generation_id": generation_id, "review_id": review_id,
+               "intake_id": provenance.get("intake_id"), "provider": provider_name, "model": model,
+               "request_id": request_id, "usage": tokens,
+               "usage_status": "PROVIDER_RETURNED_USAGE" if usage is not None else "USAGE_UNAVAILABLE",
+               "cost_status": usage_receipt.get("status", "PRICE_NOT_VERIFIED"),
+               "estimated_cost_usd": usage_receipt.get("usd_cost"), "content_batch_id": batch_id,
+               "content_variant_ids": [x["content_variant_id"] for x in output], "media_analysis": "NOT_SENT"}
+    return {"status": "PASS", "generation_id": generation_id, "content_batch_id": batch_id,
+            "content_variant_ids": receipt["content_variant_ids"], "variants": output, "receipt": receipt,
+            "normalized_facts": normalized_facts, "missing_fields": missing_fields, "conflicts": [],
+            "published": False, "mutated_property_store": False, "media_analysis": "NOT_SENT"}
 
 
 def build_generative_internal_draft(*, ai_run: dict[str, Any], facts: dict[str, Any], provenance_status: str,

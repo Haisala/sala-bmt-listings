@@ -178,7 +178,13 @@ def run_ai9_preview(package: dict[str, Any], *, performance_events: Iterable[dic
     if layers["strategy"] is not None:
         layers["strategy"]["metadata_status"] = layers["strategy"].get("status")
         layers["strategy"]["status"] = "PASS" if research.get("status") == "RESEARCH_AVAILABLE" else "INSUFFICIENT_EVIDENCE"
-    for layer in layers.values():
+    layer_numbers = {"facts": 1, "provenance": 2, "audience": 3, "research": 4, "strategy": 5,
+                     "content": 6, "gate_b": 7, "performance": 8, "learning": 9}
+    for name, layer in layers.items():
+        if not isinstance(layer, dict):
+            layer = {"classification": PRIVATE, "layer": layer_numbers[name], "status": "BLOCKED",
+                     "reason": "LAYER_OUTPUT_UNAVAILABLE"}
+            layers[name] = layer
         layer["acceptance_status"] = layer.get("status") if layer.get("status") in {"PASS", "BLOCKED", "INSUFFICIENT_EVIDENCE", "DEFERRED_POST_CONTENT"} else "BLOCKED"
     facts_revision_id = f"facts-revision-{package.get('review_id')}-r{package.get('review_revision', 1)}"
     return {"classification": PRIVATE, "ai_run_id": run_id, "review_id": package.get("review_id"), "review_state": package.get("state"), "owner_confirmed_test": owner_confirmed_test, "facts_revision_id": facts_revision_id, "lineage": {"intake_id": candidate.get("intake_id"), "ai_run_id": run_id, "facts_revision_id": facts_revision_id, "content_batch_id": None, "content_variant_ids": []}, "layers": layers, "errors": errors, "mutated_property_store": False, "published": False, "created_at": _now()}

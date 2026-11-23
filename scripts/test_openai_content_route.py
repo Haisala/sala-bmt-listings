@@ -1,143 +1,118 @@
-"""Synthetic-only Admin route check for the opt-in staging Content action."""
+"""TEST_ONLY one-touch Intake -> Review -> five private Content contract."""
 from __future__ import annotations
-
-import json
-import os
-import sys
-import tempfile
+import os, sys, tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
+ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 import admin.admin_server as admin
 from property_memory import PropertyStore
 from property_memory.intake_review import process_intake
 from property_memory.mutation_service import ReliabilityBoundary
 from property_memory.review_center import ReviewCenter
-from property_memory.providers.openai_provider import OpenAIPropertyProvider
 
+class Noop:
+    def audit(self,*a,**k): pass
+    def enqueue(self,*a,**k): return {"status":"queued"}
+class Provider:
+    provider_name="TEST_ONLY_MOCK";model="gpt-6-luna"
+    def __init__(self,count=5):self.calls=0;self.count=count
+    def generate(self,payload):
+        self.calls+=1
+        assert payload["output_count"]==5 and payload["media_analysis"]=="NOT_SENT"
+        return {"variants":[{"variant_index":i,"title":f"Fixture {i}","body":f"Distinct synthetic draft {i}","facts_used":["title"],"citations_used":[],"unknowns":[],"warnings":[]} for i in range(1,self.count+1)],
+                "normalized_facts":[],"missing_fields":["area"],"conflicts":[],
+                "usage":{"input_tokens":100,"output_tokens":300,"total_tokens":400},"provider_request_id":"req_TEST_ONLY"}
+class Usage:
+    def __init__(self):self.rows=[]
+    def record(self,**kw):
+        self.rows.append(kw);return {"status":"ESTIMATE_ONLY","usd_cost":"0.0001","tokens":kw["usage"]}
 
-class NoopM2:
-    def audit(self, *args, **kwargs):
-        pass
-
-    def enqueue(self, *args, **kwargs):
-        return {"status": "queued"}
-
-
-class FakeProvider:
-    provider_name = "TEST_ONLY"
-    model = "gpt-6-luna"
-    invalid = False
-
-    def generate(self, payload):
-        output = [
-            {"angle": angle, "title": f"TEST_ONLY {angle}", "body": f"TEST_ONLY body {angle}",
-             "facts_used": ["title"], "claims": [], "unknowns": [], "warnings": []}
-            for angle in ("NEEDS_USE", "ASSET_VALUE", "STORYTELLING")
-        ]
-        if self.invalid:
-            output[0]["facts_used"] = ["invented_field"]
-        return {"variants": output, "usage": {"input_tokens": 12, "output_tokens": 24, "total_tokens": 36}, "provider_request_id": "req_TEST_ONLY"}
-
-
-class FakeUsage:
-    def __init__(self):
-        self.rows = []
-
-    def record(self, **kwargs):
-        assert kwargs["model"] == "gpt-6-luna"
-        self.rows.append(kwargs)
-        return {"status": "COMPUTED_FROM_USAGE_AND_VERIFIED_RATE", "usd_cost": "0.00001320"}
-
+def call(handler,intake_id,key):
+    out={};handler.send_json=lambda value,status=200:out.update(value=value,status=status)
+    admin.Handler.create_content_from_intake(handler,intake_id,{"idempotency_key":key});return out
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="sala-content-route-") as folder:
-        store = PropertyStore(Path(folder) / "store.sqlite3")
-        center = ReviewCenter(store, reliability=ReliabilityBoundary(NoopM2().audit, NoopM2().enqueue))
-        intake = {"id": "TEST_ONLY-intake", "source": "TEST_ONLY", "note": "TEST_ONLY synthetic apartment",
-                  "preliminaryFacts": {"title": "TEST_ONLY apartment", "address": "TEST_ONLY area",
-                                       "area": "TEST_ONLY district", "property_type": "APARTMENT",
-                                       "transaction_type": "SALE", "price_vnd": 1000000000},
-                  "missingFields": [], "conflicts": [], "rightsStatus": "UNKNOWN", "media": []}
-        package = process_intake(store, center, intake)
-        approved = center.approve(package["review_id"], expected_revision=1, owner_id="owner",
-                                  decision="CREATE_NEW_PROPERTY", idempotency_key="TEST_ONLY-gate-a")
-        property_id = approved["mutation_result"]["property_id"]
-        core_before = store.get(property_id)
-        response = {}
-        handler = SimpleNamespace(owner_id=lambda: "owner", review_center_or_error=lambda: center,
-                                  send_json=lambda value, status=200: response.update(value=value, status=status))
-        usage_sink = FakeUsage()
-        with patch.dict(os.environ, {"BMT_ENV": "staging"}), \
-             patch.object(admin, "_CONTENT_LIVE_ENABLED", True), \
-             patch.object(admin, "_AI_PROVIDER", FakeProvider()), \
-             patch.object(admin, "_USAGE_LEDGER", usage_sink):
-            admin.Handler.content_route_post(handler, package["review_id"], "create", {"mode": "OPENAI_LIVE"})
-        value = response["value"]
-        assert response["status"] == 201 and value["published"] is False
-        assert value["generation_mode"] == "OPENAI_LIVE_PRIVATE_DRAFT" and len(value["variants"]) == 3
-        assert value["generation"]["request_id"] == "req_TEST_ONLY"
-        assert value["generation"]["usage"]["total_tokens"] == 36
-        assert len(usage_sink.rows) == 1 and usage_sink.rows[0]["outcome"] == "SUCCEEDED"
-        assert store.get(property_id) == core_before
-        assert center.packages[package["review_id"]]["content_batches"][-1]["status"] == "PRIVATE_DRAFT"
+  with tempfile.TemporaryDirectory(prefix="sala-one-touch-test-") as folder:
+    root=Path(folder); private=root/"private";private.mkdir(mode=0o700)
+    store=PropertyStore(private/"store.sqlite3"); noop=Noop()
+    center=ReviewCenter(store,reliability=ReliabilityBoundary(noop.audit,noop.enqueue))
+    intake={"id":"TEST_ONLY-intake-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-fixture",
+      "note":"TEST_ONLY synthetic 72 square meter home in TEST_ONLY district",
+      "preliminaryFacts":{"title":"TEST_ONLY-home","property_type":"HOUSE"},"media":[]}
+    pkg=process_intake(store,center,intake,ai_gateway=None,operation_id=intake["id"])
+    pkg=center.packages[pkg["review_id"]]
+    pkg["evidence_revisions"]=[{"evidence_revision_id":"TEST_ONLY-evidence-r1","evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture"}]}}]
+    center._persist(pkg)
+    missing={"id":"TEST_ONLY-intake-no-rights","source":"TEST_ONLY","note":"TEST_ONLY synthetic source","media":[]}
+    provider=Provider();usage=Usage()
+    handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center)
+    with patch.dict(os.environ,{"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":folder,"BMT_ADMIN_OWNER_ID":"owner"}), \
+         patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"HOST","127.0.0.1"), \
+         patch.object(admin,"_CONTENT_LIVE_ENABLED",True),patch.object(admin,"_AI_PROVIDER",provider),patch.object(admin,"_USAGE_LEDGER",usage), \
+         patch.object(admin,"load_index",lambda:[intake,missing]):
+      result=call(handler,intake["id"],"TEST_ONLY-idempotency-key-001")
+      assert result["status"]==201,result
+      body=result["value"]
+      assert len(body["variants"])==5 and body["published"] is False and body["mutated_property_store"] is False
+      assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
+      assert body["generation"]["content_variant_ids"]==[v["content_variant_id"] for v in body["variants"]]
+      assert body["generation"]["estimated_cost_usd"]=="0.0001"
+      assert len(usage.rows[0]["usage"])==3 and usage.rows[0]["review_id"]==pkg["review_id"]
+      denied_rights=call(handler,missing["id"],"TEST_ONLY-no-rights-key-001")
+      assert denied_rights["status"]==409 and "CONTENT_RIGHTS_REQUIRED" in denied_rights["value"]["blockers"]
+      assert provider.calls==1 and len(usage.rows)==1
+      again=call(handler,intake["id"],"TEST_ONLY-idempotency-key-001")
+      assert again["status"]==200 and len(again["value"]["variants"])==5 and provider.calls==1 and len(usage.rows)==1
+      persisted=center.packages[pkg["review_id"]]
+      assert len(persisted["content_batches"])==1 and len(persisted["content_batches"][0]["variants"])==5
+      assert persisted["content_batches"][0]["status"]=="PRIVATE_DRAFT"
+      assert store.list_properties()==[]
+      denied=SimpleNamespace(owner_id=lambda:None,review_center_or_error=lambda:center,send_json=lambda v,status=200:None)
+      denied_out=call(denied,intake["id"],"TEST_ONLY-anonymous-key-001")
+      assert denied_out["status"]==403 and provider.calls==1
+    # Exercise the actual authenticated POST route over loopback with TEST_ONLY storage.
+    import json, threading, urllib.error, urllib.request
+    from http.server import ThreadingHTTPServer
+    http_root=root/"http"; http_root.mkdir(mode=0o700)
+    http_private=http_root/"private"; http_private.mkdir(mode=0o700)
+    http_store=PropertyStore(http_private/"store.sqlite3")
+    http_center=ReviewCenter(http_store,reliability=ReliabilityBoundary(noop.audit,noop.enqueue))
+    http_intake={"id":"TEST_ONLY-intake-http-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-http-fixture",
+      "note":"TEST_ONLY synthetic source text","preliminaryFacts":{"title":"TEST_ONLY HTTP property"},"media":[]}
+    http_pkg=process_intake(http_store,http_center,http_intake,ai_gateway=None,operation_id=http_intake["id"])
+    http_pkg=http_center.packages[http_pkg["review_id"]]
+    http_pkg["evidence_revisions"]=[{"evidence_revision_id":"TEST_ONLY-http-evidence","evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-http-source","claim":"TEST_ONLY source"}]}}]
+    http_center._persist(http_pkg)
+    (http_private/"index.json").write_text(json.dumps([http_intake]))
+    http_provider=Provider();http_usage=Usage();sid="TEST_ONLY-session"
+    env={"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":str(http_root),"BMT_ADMIN_OWNER_ID":"owner",
+      "BMT_ADMIN_LOCAL_HTTP_DEV":"1","BMT_ADMIN_PUBLIC_ORIGIN":"","BMT_ADMIN_ALLOWED_IP":"","BMT_ADMIN_SECURE_COOKIE":"0"}
+    with patch.dict(os.environ,env,clear=True),patch.object(admin,"PRIVATE_ROOT",http_private),patch.object(admin,"INBOX_ROOT",http_private/"inbox"),\
+         patch.object(admin,"INDEX_PATH",http_private/"index.json"),patch.object(admin,"HOST","127.0.0.1"),patch.object(admin,"ALLOWED_REMOTE_IP",""),\
+         patch.object(admin,"SECURE_COOKIE",False),patch.object(admin,"REVIEW_CENTER",http_center),patch.object(admin,"_CONTENT_LIVE_ENABLED",True),\
+         patch.object(admin,"_AI_PROVIDER",http_provider),patch.object(admin,"_USAGE_LEDGER",http_usage):
+      admin.SESSIONS[sid]=9999999999;admin.SESSION_OWNERS[sid]="owner"
+      server=ThreadingHTTPServer(("127.0.0.1",0),admin.Handler);admin.PORT=server.server_port
+      thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+      url=f"http://127.0.0.1:{server.server_port}/api/intakes/{http_intake['id']}/create-content"
+      request=urllib.request.Request(url,data=json.dumps({"idempotency_key":"TEST_ONLY-http-idempotency-001"}).encode(),method="POST",
+        headers={"Content-Type":"application/json","Origin":f"http://127.0.0.1:{server.server_port}","Cookie":"bmt_admin_session="+sid})
+      with urllib.request.urlopen(request,timeout=5) as response: status=response.status;http_body=json.loads(response.read())
+      assert status==201 and len(http_body["variants"])==5 and http_body["published"] is False
+      with urllib.request.urlopen(request,timeout=5) as response: replay_status=response.status;replay_body=json.loads(response.read())
+      assert replay_status==200 and replay_body["content_batch_id"]==http_body["content_batch_id"]
+      assert http_provider.calls==1 and len(http_usage.rows)==1 and http_store.list_properties()==[]
+      server.shutdown();server.server_close();thread.join(timeout=3);admin.SESSIONS.pop(sid,None);admin.SESSION_OWNERS.pop(sid,None);http_store.close()
 
-        from property_memory.content_studio import build_generative_internal_draft
-        bad_sink = FakeUsage()
-        bad_provider = FakeProvider()
-        bad_provider.invalid = True
-        bad = build_generative_internal_draft(ai_run={"ai_run_id":"TEST_ONLY-bad", "facts_revision_id":"facts-test-r1"},
-                                               facts=package["candidate"]["facts"], provenance_status="PASS",
-                                               rights_status="APPROVED", provider=bad_provider, model="gpt-6-luna", usage_sink=bad_sink)
-        assert bad["status"] == "BLOCKED" and bad["generation"]["request_id"] == "req_TEST_ONLY"
-        assert len(bad_sink.rows) == 1 and bad_sink.rows[0]["outcome"] == "FAILED"
-        from property_memory.providers.openai_provider import ProviderError
-
-        class FailingProvider:
-            provider_name = "TEST_ONLY"
-
-            def generate(self, payload):
-                raise ProviderError("PROVIDER_4XX", "TEST_ONLY provider failure",
-                                    diagnostics={"http_status": 400, "error_code": "model_not_found"})
-
-        safe_failure = build_generative_internal_draft(
-            ai_run={"ai_run_id": "TEST_ONLY-fail", "facts_revision_id": "facts-test-r1"},
-            facts=package["candidate"]["facts"], provenance_status="PASS", rights_status="APPROVED",
-            provider=FailingProvider(), model="gpt-6-luna", usage_sink=FakeUsage())
-        assert safe_failure["reason_codes"] == ["CONTENT_PROVIDER_ERROR_PROVIDER_4XX"]
-        assert safe_failure["generation"]["provider_http_status"] == 400
-        assert safe_failure["generation"]["provider_error_code"] == "model_not_found"
-
-        class MalformedResponseTransport:
-            def send(self, payload, api_key, *, timeout):
-                return {"id": "req_TEST_ONLY_malformed", "status": "incomplete",
-                        "incomplete_details": {"reason": "max_output_tokens"},
-                        "usage": {"input_tokens": 71, "output_tokens": 900, "total_tokens": 971},
-                        "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "PRIVATE_MUST_NOT_LEAK"}]}]}
-
-        malformed_sink = FakeUsage()
-        malformed = build_generative_internal_draft(
-            ai_run={"ai_run_id": "TEST_ONLY-malformed", "facts_revision_id": "facts-test-r1",
-                    "lineage": {"intake_id": "TEST_ONLY-intake"}},
-            facts=package["candidate"]["facts"], provenance_status="PASS", rights_status="APPROVED",
-            provider=OpenAIPropertyProvider(api_key="TEST_ONLY_KEY", transport=MalformedResponseTransport()),
-            model="gpt-6-luna", usage_sink=malformed_sink)
-        assert malformed["status"] == "BLOCKED"
-        assert malformed["generation"]["request_id"] == "req_TEST_ONLY_malformed"
-        assert malformed["generation"]["usage"]["total_tokens"] == 971
-        assert malformed["generation"]["provider_response_status"] == "incomplete"
-        assert malformed["generation"]["provider_incomplete_reason"] == "max_output_tokens"
-        assert malformed_sink.rows[-1]["outcome"] == "FAILED"
-        assert malformed_sink.rows[-1]["provider_request_id"] == "req_TEST_ONLY_malformed"
-        assert malformed_sink.rows[-1]["usage"]["total_tokens"] == 971
-        assert "PRIVATE_MUST_NOT_LEAK" not in json.dumps(malformed)
-        store.close()
-        print("PASS: TEST_ONLY Admin AI route, Gate A revision binding, exactly 3 variants, usage/request receipt, private-only state, Property Core unchanged, sanitized provider failure receipt")
-
-
-if __name__ == "__main__":
-    main()
+    from property_memory.content_studio import build_generative_content_batch
+    base=dict(generation_id="TEST_ONLY-malformed",facts={"title":"TEST_ONLY"},provenance={"intake_id":intake["id"]},
+      rights_status="PERSONAL",media=[],model="gpt-6-luna",source_text="TEST_ONLY text",usage_sink=usage)
+    for n in (4,6):
+      bad=Provider(count=n);out=build_generative_content_batch(**base,provider=bad)
+      assert out["status"]=="BLOCKED" and bad.calls==1
+    no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights)
+    assert out["status"]=="BLOCKED" and no_rights.calls==0
+    store.close()
+  print("PASS: authenticated loopback HTTP one-touch 201→5 private variants, replay 200 with 1 mock call/receipt, 0 Property Core writes/publish; direct negative checks for unauthorized, 4/6 outputs and missing rights")
+if __name__=="__main__":main()

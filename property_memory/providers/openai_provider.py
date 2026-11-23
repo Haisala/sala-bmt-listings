@@ -15,6 +15,11 @@ DEFAULT_EXTRACTION_MODEL = "gpt-6-luna"
 PROPERTY_EXTRACTION_PROMPT_VERSION = "bmt-property-v1"
 ENDPOINT = "https://api.openai.com/v1/responses"
 CONTENT_PROMPT_VERSION = "content-studio-v2"
+CONTENT_VARIANT_COUNT = 5
+CONTENT_NORMALIZED_FACT_FIELDS = (
+    "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
+    "price_type", "legal_status", "house_type", "description",
+)
 
 EXTRACTION_RESPONSE_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -37,21 +42,23 @@ EXTRACTION_RESPONSE_SCHEMA = {
     "required": ["fields", "missing_fields", "conflicts", "rights_status", "raw_source"],
 }
 
+_STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
 CONTENT_RESPONSE_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "properties": {"variants": {"type": "array", "minItems": 3, "maxItems": 3, "items": {
-        "type": "object", "additionalProperties": False,
-        "properties": {
-            "angle": {"type": "string", "enum": ["NEEDS_USE", "ASSET_VALUE", "STORYTELLING"]},
-            "body": {"type": "string", "maxLength": 420}, "title": {"type": "string", "maxLength": 80},
-            "facts_used": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-            "claims": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
-            "unknowns": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
-            "warnings": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
-        },
-        "required": ["angle", "body", "title", "facts_used", "claims", "unknowns", "warnings"],
-    }}},
-    "required": ["variants"],
+    "properties": {
+        "v": {"type": "array", "minItems": CONTENT_VARIANT_COUNT, "maxItems": CONTENT_VARIANT_COUNT, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"i": {"type": "integer", "minimum": 1, "maximum": CONTENT_VARIANT_COUNT},
+                           "t": {"type": "string"}, "b": {"type": "string"},
+                           "f": _STRING_ARRAY, "u": _STRING_ARRAY, "w": _STRING_ARRAY},
+            "required": ["i", "t", "b", "f", "u", "w"]}},
+        "f": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "properties": {"k": {"type": "string"}, "r": {"type": "string"},
+                           "n": {"type": "string"}, "e": {"type": "string"}},
+            "required": ["k", "r", "n", "e"]}},
+        "m": _STRING_ARRAY, "c": _STRING_ARRAY,
+    },
+    "required": ["v", "f", "m", "c"],
 }
 
 MAX_CONTENT_REQUEST_BYTES = 8000
@@ -114,27 +121,33 @@ def _content_cost_upper_bound(request_bytes: int, max_output_tokens: int) -> flo
 
 
 def build_content_request(payload: dict[str, Any], model: str, *, max_output_tokens: int = MAX_CONTENT_OUTPUT_TOKENS) -> dict[str, Any]:
-    """Build one bounded three-variant request from revision-bound approved facts."""
+    """Build one bounded five-variant request from revision-bound facts."""
     if model != DEFAULT_EXTRACTION_MODEL or max_output_tokens != MAX_CONTENT_OUTPUT_TOKENS:
         raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
     facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
-    instructions = ("3 distinct Vietnamese drafts, one per angle. Title<=80 chars; body<=420. "
-                    "Facts only; facts_used=exact input keys. Never invent legal/ownership/amenities/returns/media rights. JSON.")
+    source_text = payload.get("source_text")
+    if source_text is not None and (not isinstance(source_text, str) or len(source_text) > 320):
+        raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
+    if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
+        raise ValueError("CONTENT_INPUT_REQUIRED")
+    instructions = "Use source quotes only; normalize facts. Return 5 distinct Vietnamese drafts. No invented facts, legal claims or rights."
     schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
         allowed = {"facts": selected_facts}
+        if isinstance(source_text, str) and source_text.strip():
+            allowed["source_text"] = source_text
         request = {"model": model, "instructions": instructions,
                    "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
                    "reasoning": {"effort": "low"},
                    "max_output_tokens": max_output_tokens,
-                   "text": {"format": {"type": "json_schema", "name": "content_studio_three", "strict": True,
+                   "text": {"format": {"type": "json_schema", "name": "content_five", "strict": True,
                                         "schema": CONTENT_RESPONSE_SCHEMA}}}
         request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         input_token_upper_bound = (len(instructions.encode("utf-8")) + len(request["input"].encode("utf-8"))
-                                   + schema_bytes + len("content_studio_three"))
+                                   + schema_bytes + len("content_five"))
         return request if request_bytes <= MAX_CONTENT_REQUEST_BYTES and input_token_upper_bound <= MAX_CONTENT_INPUT_TOKENS else None
 
     selected: dict[str, Any] = {}
@@ -154,7 +167,7 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         if bounded is not None:
             selected = candidate
             request = bounded
-    if request is None or not selected:
+    if request is None:
         raise ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")
     request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     if _content_cost_upper_bound(request_bytes, max_output_tokens) >= MAX_CONTENT_COST_USD:
@@ -287,8 +300,22 @@ class OpenAIPropertyProvider:
             exc.diagnostics.update(_safe_response_diagnostics(response))
             exc.diagnostics.setdefault("model", self.model)
             raise
-        if not isinstance(value.get("variants"), list) or len(value["variants"]) != 3:
-            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly three variants")
+        if "v" in value:
+            value = {"variants": [{"variant_index": x.get("i"), "title": x.get("t"), "body": x.get("b"),
+                                    "facts_used": x.get("f"), "citations_used": [], "unknowns": x.get("u"),
+                                    "warnings": x.get("w")} for x in value.get("v", []) if isinstance(x, dict)],
+                     "normalized_facts": [{"field": x.get("k"), "raw_value": x.get("r"),
+                                           "normalized_value": x.get("n"), "evidence": x.get("e")}
+                                          for x in value.get("f", []) if isinstance(x, dict)],
+                     "missing_fields": value.get("m"), "conflicts": value.get("c")}
+        variants = value.get("variants")
+        indices = [x.get("variant_index") for x in variants if isinstance(x, dict)] if isinstance(variants, list) else []
+        if (not isinstance(variants, list) or len(variants) != CONTENT_VARIANT_COUNT
+                or any(type(index) is not int for index in indices)
+                or sorted(indices) != list(range(1, CONTENT_VARIANT_COUNT + 1))):
+            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly five indexed variants")
+        if not isinstance(value.get("normalized_facts"), list) or not isinstance(value.get("missing_fields"), list) or not isinstance(value.get("conflicts"), list):
+            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content response omitted normalized-facts fields")
         value["usage"] = response.get("usage") if isinstance(response.get("usage"), dict) else None
         value["provider_request_id"] = response.get("id") if isinstance(response.get("id"), str) else None
         value["metadata"] = {"provider": self.provider_name, "model": self.model, "prompt_version": CONTENT_PROMPT_VERSION}

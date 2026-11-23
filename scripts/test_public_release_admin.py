@@ -288,7 +288,7 @@ def main() -> None:
         assert "data-release-approve" in html_page and "data-release-revoke" in html_page
         assert 'href="#intake-section"' in html_page and 'href="#review-section"' in html_page
         assert "local-only" not in html_page and "AI9 TEST ONLY" not in html_page
-        assert "Chạy AI9 TEST_ONLY" not in html_page and "content-studio" not in html_page
+        assert "Chạy AI9 TEST_ONLY" not in html_page and "TẠO CONTENT" in html_page
         assert "min-height:44px;flex:1 1 180px" in html_page and 'name="viewport"' in html_page
         saved_test_env = {key: os.environ.get(key) for key in ("BMT_ENV", "BMT_TEST_ONLY", "SALA_E2E_ROOT", "BMT_ADMIN_PUBLIC_ORIGIN", "BMT_ADMIN_ALLOWED_IP")}
         saved_security = (adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP)

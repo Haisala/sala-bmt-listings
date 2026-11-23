@@ -355,7 +355,8 @@ def run_e2e() -> None:
               and '<a href="#owner-analytics">Traffic</a>' in page_text,
               "owner_mobile_navigation_present", evidence, f"HTTP {status}")
         check("AI9 TEST ONLY" not in page_text and "Chạy AI9 TEST_ONLY" not in page_text and "local-only" not in page_text
-              and "content-studio" not in page_text, "owner_test_controls_and_content_phase_hidden", evidence)
+              and "TẠO CONTENT" in page_text and "/create-content" in page_text,
+              "one_touch_content_ui_no_ai9_test_control", evidence)
         status, _, test_receipt = json_call(admin_origin + "/api/ai9/test-only", method="POST", headers={**admin_headers, "Content-Length": "0"})
         check(status == 200 and test_receipt.get("published") is False and test_receipt.get("mutated_property_store") is False,
               "authenticated_test_only_route_and_cleanup", evidence, f"HTTP {status}")
@@ -425,11 +426,23 @@ def run_e2e() -> None:
         check(status == 201 and intake.get("status") == "RECEIVED" and intake.get("media") == []
               and intake.get("upload", {}).get("accepted") == 0,
               "admin_http_note_only_intake", evidence, f"HTTP {status}")
+        status, _, disabled_content = json_call(admin_origin + f"/api/intakes/{intake['id']}/create-content",
+                                                 method="POST", obj={"idempotency_key":"TEST_ONLY-disabled-content-01"},
+                                                 headers=admin_headers)
+        check(status == 403 and disabled_content.get("error") == "CONTENT_PHASE_DISABLED",
+              "staging_content_provider_remains_disabled", evidence, f"HTTP {status}")
         status, _, replay_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=intake_headers)
         replay = json.loads(replay_raw)
         check(status == 200 and replay.get("id") == intake.get("id") and replay.get("upload", {}).get("accepted") == 0
               and replay.get("upload", {}).get("duplicate_count") == 0,
               "admin_intake_replay_single_record", evidence, f"HTTP {status}")
+        status, _, denied_process = request(admin_origin + f"/api/intakes/{intake['id']}/process", method="POST",
+                                            data=b"", headers={"Origin": admin_origin, "Content-Length": "0"})
+        check(status == 401, "anonymous_intake_process_denied", evidence, f"HTTP {status}")
+        status, _, missing_process = json_call(admin_origin + "/api/intakes/intake-TEST_ONLY-missing/process",
+                                               method="POST", obj=None,
+                                               headers={**admin_headers, "Content-Length": "0"})
+        check(status == 404, "missing_intake_process_returns_404", evidence, f"HTTP {status}")
         collision_files = [("same-name.jpg", PNG + b"first"), ("same-name.jpg", PNG + b"second")]
         collision_type, collision_body = multipart({**test_media_fields, "note": "TEST_ONLY same filename distinct bytes"}, files=collision_files)
         status, _, collision_raw = request(admin_origin + "/api/intakes", method="POST", data=collision_body,
@@ -450,6 +463,20 @@ def run_e2e() -> None:
         processed = json.loads(processed_raw)
         check(status == 201 and processed.get("state") == "PENDING_REVIEW", "admin_http_process_review", evidence, f"HTTP {status}")
         review_id = processed["review_id"]
+        status, _, pending_before_replay = json_call(admin_origin + f"/api/reviews/{review_id}", headers=admin_headers)
+        status_replay, _, processed_replay = request(admin_origin + f"/api/intakes/{intake['id']}/process", method="POST",
+                                                     data=b"", headers={**admin_headers, "Content-Length": "0"})
+        processed_replay = json.loads(processed_replay)
+        status_after, _, pending_after_replay = json_call(admin_origin + f"/api/reviews/{review_id}", headers=admin_headers)
+        status_list, _, review_rows = json_call(admin_origin + "/api/reviews", headers=admin_headers)
+        status_properties, _, properties_before_gate = json_call(admin_origin + "/api/properties", headers=admin_headers)
+        check(status == 200 and status_replay == 201 and status_after == 200 and status_list == 200
+              and processed_replay.get("review_id") == review_id
+              and processed_replay.get("state") == pending_before_replay.get("state") == pending_after_replay.get("state") == "PENDING_REVIEW"
+              and processed_replay.get("review_revision") == pending_before_replay.get("review_revision") == pending_after_replay.get("review_revision") == 1
+              and len([x for x in review_rows if x.get("intake_id") == intake["id"]]) == 1
+              and status_properties == 200 and properties_before_gate == [],
+              "process_replay_single_pending_review_no_core_write", evidence, f"HTTP {status_replay}")
 
         facts = {
             "title": "TEST_ONLY HTTP Home", "property_type": "HOUSE", "address": "TEST_ONLY E2E Address",
@@ -473,6 +500,19 @@ def run_e2e() -> None:
                                     obj={"expected_revision": revision, "decision": "CREATE_NEW_PROPERTY", "idempotency_key": "TEST_ONLY-gate-a-e2e-01"}, headers=admin_headers)
         check(status == 200 and gate.get("state") == "APPROVED", "admin_gate_a_http", evidence, f"HTTP {status}")
         property_id = gate["mutation_result"]["property_id"]
+        status, _, approved_before_process_replay = json_call(admin_origin + f"/api/reviews/{review_id}", headers=admin_headers)
+        status_process_replay, _, approved_process_raw = request(admin_origin + f"/api/intakes/{intake['id']}/process", method="POST",
+                                                                 data=b"", headers={**admin_headers, "Content-Length": "0"})
+        approved_process = json.loads(approved_process_raw)
+        status, _, approved_after_process_replay = json_call(admin_origin + f"/api/reviews/{review_id}", headers=admin_headers)
+        check(status == 200 and status_process_replay == 201 and approved_process.get("review_id") == review_id
+              and approved_process.get("state") == "APPROVED"
+              and approved_process.get("review_revision") == approved_before_process_replay.get("review_revision") == approved_after_process_replay.get("review_revision")
+              and approved_before_process_replay.get("state") == approved_after_process_replay.get("state") == "APPROVED"
+              and approved_before_process_replay.get("decision") == approved_after_process_replay.get("decision")
+              and approved_before_process_replay.get("mutation_result") == approved_after_process_replay.get("mutation_result") == gate.get("mutation_result")
+              and approved_before_process_replay.get("owner_edits") == approved_after_process_replay.get("owner_edits"),
+              "process_replay_approved_review_not_reset", evidence, f"HTTP {status_process_replay}")
         check(request(customer_origin + "/api/listings")[0] == 503, "gate_a_without_web_publish_customer_fail_closed", evidence, "HTTP 503")
 
         from property_memory import PropertyStore
