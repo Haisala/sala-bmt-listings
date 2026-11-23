@@ -124,7 +124,7 @@ def curl_https_request(url: str, *, method: str = "GET", data: bytes | None = No
             for line in blocks[-1].split(b"\r\n")[1:]:
                 name, sep, value = line.partition(b":")
                 if sep:
-                    response_headers[name.decode("latin-1").strip()] = value.decode("latin-1").strip()
+                    response_headers[name.decode("latin-1").strip().title()] = value.decode("latin-1").strip()
         return int(completed.stdout.strip()), response_headers, output_path.read_bytes()
     finally:
         for path in created:
