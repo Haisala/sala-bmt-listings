@@ -81,6 +81,58 @@ class CustomerWebTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthError, "cannot configure a legacy Owner credential"):
             Application(path, PASSWORD, {ORIGIN}, legacy_owner_enabled=False)
 
+    def test_isolated_https_test_namespace_is_authenticated_and_separate(self):
+        root = Path(self.temp.name) / "test-namespace"
+        projection = root / "projection" / "listings.json"
+        assets = root / "assets"
+        image_ref = "assets/images/test-only-home/front.png"
+        asset = assets / "images" / "test-only-home" / "front.png"
+        asset.parent.mkdir(mode=0o700, parents=True)
+        asset.write_bytes(PNG)
+        asset.chmod(0o600)
+        projection.parent.mkdir(mode=0o700, parents=True)
+        row = {
+            "id": "listing-test-only", "slug": "test-only-home", "title": "TEST_ONLY sample home",
+            "status": "Đang bán", "price": 1250000000, "features": [], "images": [image_ref],
+            "updatedAt": "2026-11-23T00:00:00Z", "propertyType": "HOUSE", "addressText": "TEST_ONLY area",
+            "area": 72, "transactionType": "SALE", "description": "Synthetic public description",
+            "propertyId": "property-test-only", "propertyRevision": 1,
+            "projectionId": "projection-test-only", "publicationId": "publication-0123456789abcdef0123456789abcdef",
+            "projectionGeneratedAt": "2026-11-23T00:00:00Z", "sourceSystem": "SALA_PROPERTY_CORE",
+            "publicationStatus": "APPROVED", "publicationRevision": 1,
+            "publicationApprovedAt": "2026-11-23T00:00:00Z", "mediaRights": {image_ref: "APPROVED_PUBLIC"},
+        }
+        projection.write_text(json.dumps([row], ensure_ascii=False), encoding="utf-8")
+        token = "test-only-bearer-token-value-0123456789abcdef"
+        app = Application(
+            Path(self.temp.name) / "must-not-exist.sqlite3", allowed_origins={ORIGIN},
+            public_projection_path=Path(self.temp.name) / "shared-projection-missing.json",
+            public_assets_root=Path(self.temp.name) / "shared-assets-missing", legacy_owner_enabled=False,
+            test_namespace_projection_path=projection, test_namespace_assets_root=root,
+            test_namespace_token=token,
+        )
+        prefix = "/__issue39_test__"
+        self.assertEqual(app.handle("GET", prefix + "/api/listings").status, 401)
+        self.assertEqual(app.handle("GET", prefix + "/api/listings", {"Authorization": "Bearer invalid-token"}).status, 401)
+        headers = {"Authorization": f"Bearer {token}"}
+        feed = app.handle("GET", prefix + "/api/listings?q=TEST_ONLY", headers)
+        self.assertEqual(feed.status, 200)
+        listing = json.loads(feed.body)["items"][0]
+        self.assertEqual(listing["property_id"], "property-test-only")
+        self.assertNotIn("owner_contact", listing)
+        self.assertEqual(app.handle("GET", prefix + "/api/listings/listing-test-only", headers).status, 200)
+        media = app.handle("GET", prefix + "/media/" + listing["media"][0]["media_id"], headers)
+        self.assertEqual((media.status, media.body), (200, PNG))
+        self.assertEqual(app.handle("GET", "/api/listings").status, 503)
+        self.assertEqual(app.handle("POST", prefix + "/api/listings", headers, b"{}" ).status, 404)
+        self.assertFalse((Path(self.temp.name) / "must-not-exist.sqlite3").exists())
+        projection.write_text("[]", encoding="utf-8")
+        self.assertEqual(json.loads(app.handle("GET", prefix + "/api/listings", headers).body)["items"], [])
+        self.assertEqual(app.handle("GET", prefix + "/api/listings/listing-test-only", headers).status, 404)
+        self.assertEqual(app.handle("GET", prefix + "/media/" + listing["media"][0]["media_id"], headers).status, 404)
+        disabled = Application(Path(self.temp.name) / "disabled.sqlite3", allowed_origins={ORIGIN}, legacy_owner_enabled=False)
+        self.assertEqual(disabled.handle("GET", prefix + "/api/listings", headers).status, 404)
+
     def test_boot_health_assets_and_secure_headers(self):
         health = self.app.handle("GET", "/health")
         self.assertEqual(health.status, 200)

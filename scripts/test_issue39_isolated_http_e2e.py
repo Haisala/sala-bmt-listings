@@ -12,12 +12,14 @@ import sys
 import tempfile
 import threading
 import uuid
+import shutil
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER_PASSWORD = "TEST_ONLY-admin-password-e2e-2026"
@@ -59,6 +61,133 @@ def json_call(url: str, *, method: str = "GET", obj: Any = None,
     except (UnicodeDecodeError, json.JSONDecodeError):
         parsed = None
     return status, response_headers, parsed
+
+
+def staging_customer_namespace() -> dict[str, Any] | None:
+    """Optionally exercise only the authenticated, isolated HTTPS test projection."""
+    values = {key: os.environ.get(key, "").strip() for key in (
+        "ISSUE39_STAGING_CUSTOMER_ORIGIN", "ISSUE39_STAGING_TEST_NAMESPACE_ROOT",
+        "ISSUE39_STAGING_TEST_NAMESPACE_TOKEN_FILE")}
+    if not any(values.values()):
+        return None
+    if not all(values.values()):
+        raise E2EFailure("STAGING_TEST_NAMESPACE_CONFIG_INCOMPLETE")
+    parts = urlsplit(values["ISSUE39_STAGING_CUSTOMER_ORIGIN"])
+    if (parts.scheme != "https" or parts.netloc != "web-staging.haisala.io.vn"
+            or parts.path or parts.query or parts.fragment):
+        raise E2EFailure("STAGING_TEST_ORIGIN_NOT_ALLOWLISTED")
+    root_input = Path(values["ISSUE39_STAGING_TEST_NAMESPACE_ROOT"]).expanduser()
+    token_input = Path(values["ISSUE39_STAGING_TEST_NAMESPACE_TOKEN_FILE"]).expanduser()
+    if root_input.is_symlink() or token_input.is_symlink():
+        raise E2EFailure("STAGING_TEST_PATH_SYMLINK_REJECTED")
+    root = root_input.resolve(strict=True)
+    token_file = token_input.resolve(strict=True)
+    if (not root.is_dir() or root.stat().st_uid != os.getuid()
+            or (root.stat().st_mode & 0o777) != 0o700):
+        raise E2EFailure("STAGING_TEST_ROOT_NOT_PRIVATE")
+    if token_file != root / "control" / "bearer-token":
+        raise E2EFailure("STAGING_TEST_TOKEN_PATH_INVALID")
+    info = token_file.stat()
+    if not info.st_uid == os.getuid() or (info.st_mode & 0o777) != 0o600 or not token_file.is_file():
+        raise E2EFailure("STAGING_TEST_TOKEN_NOT_PRIVATE")
+    token = token_file.read_text(encoding="ascii").strip()
+    if len(token) < 32:
+        raise E2EFailure("STAGING_TEST_TOKEN_INVALID")
+    for directory in (root / "projection", root / "assets", root / "control"):
+        if not directory.is_dir() or directory.is_symlink() or directory.stat().st_mode & 0o077:
+            raise E2EFailure("STAGING_TEST_STORAGE_NOT_PRIVATE")
+
+    def https_get(path: str, *, auth_token: str | None = token) -> tuple[int, bytes]:
+        if not path.startswith("/") or "\r" in path or "\n" in path:
+            raise E2EFailure("STAGING_TEST_PATH_INVALID")
+        url = values["ISSUE39_STAGING_CUSTOMER_ORIGIN"] + path
+        config = f'url = "{url}"\nmax-time = 20\nsilent\nshow-error\n'
+        if auth_token is not None:
+            config += f'header = "Authorization: Bearer {auth_token}"\n'
+        config += 'write-out = "\\n__ISSUE39_HTTP_CODE__:%{http_code}\\n"\n'
+        completed = subprocess.run(["curl", "--config", "-", "--output", "-"],
+                                   input=config.encode("ascii"), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, check=False)
+        if completed.returncode:
+            raise E2EFailure("STAGING_TEST_HTTPS_REQUEST_FAILED")
+        marker = b"\n__ISSUE39_HTTP_CODE__:"
+        body, sep, tail = completed.stdout.rpartition(marker)
+        if not sep or not tail.strip().isdigit():
+            raise E2EFailure("STAGING_TEST_HTTPS_STATUS_MISSING")
+        return int(tail.strip()), body
+
+    return {"root": root, "projection": root / "projection" / "listings.json", "assets_dir": root / "assets",
+            "asset": root / "assets" / "images" / "test-only-http-home" / "front.png",
+            "https_get": https_get}
+
+
+def publish_isolated_fixture_to_staging(namespace: dict[str, Any] | None, artifact: bytes,
+                                        source_asset: Path, expected_property_id: str,
+                                        expected_listing_id: str, expected_media_id: str,
+                                        evidence: dict[str, Any]) -> None:
+    if namespace is None:
+        return
+    projection = namespace["projection"]
+    asset = namespace["asset"]
+    if projection.exists() or asset.exists() or any(namespace["assets_dir"].rglob("*")):
+        raise E2EFailure("STAGING_TEST_NAMESPACE_NOT_EMPTY")
+    temp_projection = projection.with_name(".listings.json.issue39-tmp")
+    temp_projection.write_bytes(artifact)
+    temp_projection.chmod(0o600)
+    os.replace(temp_projection, projection)
+    asset.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.copyfile(source_asset, asset)
+    asset.chmod(0o600)
+    request = namespace["https_get"]
+    prefix = "/__issue39_test__"
+    unauth = request(prefix + "/api/listings", auth_token=None)[0]
+    bad_auth = request(prefix + "/api/listings", auth_token="invalid-test-token")[0]
+    check(unauth == 401 and bad_auth == 401, "staging_test_namespace_auth_denied", evidence,
+          f"no-token HTTP {unauth}; bad-token HTTP {bad_auth}")
+    status, health_raw = request(prefix + "/health")
+    check(status == 200 and json.loads(health_raw).get("storage") == "isolated_test_projection",
+          "staging_test_namespace_health", evidence, f"HTTP {status}")
+    status, feed_raw = request(prefix + "/api/listings")
+    feed = json.loads(feed_raw)
+    check(status == 200 and len(feed.get("items", [])) == 1, "staging_https_customer_feed", evidence, f"HTTP {status}")
+    listing = feed["items"][0]
+    check(listing.get("property_id") == expected_property_id and listing.get("listing_id") == expected_listing_id,
+          "staging_https_customer_identity", evidence)
+    status, search_raw = request(prefix + "/api/listings?q=TEST_ONLY")
+    check(status == 200 and len(json.loads(search_raw).get("items", [])) == 1,
+          "staging_https_customer_search", evidence, f"HTTP {status}")
+    status, detail_raw = request(prefix + "/api/listings/" + expected_listing_id)
+    detail = json.loads(detail_raw)
+    check(status == 200 and detail.get("property_id") == expected_property_id
+          and detail.get("property_revision") == 1 and "owner_contact" not in detail,
+          "staging_https_customer_detail_private_allowlist", evidence, f"HTTP {status}")
+    status, media = request(prefix + "/media/" + expected_media_id)
+    check(status == 200 and hashlib.sha256(media).hexdigest() == hashlib.sha256(PNG).hexdigest(),
+          "staging_https_customer_approved_media", evidence, f"HTTP {status}")
+    evidence["staging_customer_https"] = {
+        "origin": "web-staging.haisala.io.vn", "feed": 200, "search": 200,
+        "detail": 200, "media": 200, "no_auth": unauth, "invalid_auth": bad_auth,
+        "artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+    }
+
+
+def revoke_isolated_fixture_from_staging(namespace: dict[str, Any] | None, listing_id: str,
+                                         media_id: str, evidence: dict[str, Any]) -> None:
+    if namespace is None:
+        return
+    namespace["projection"].write_text("[]", encoding="utf-8")
+    namespace["projection"].chmod(0o600)
+    request = namespace["https_get"]
+    prefix = "/__issue39_test__"
+    status, feed_raw = request(prefix + "/api/listings")
+    check(status == 200 and json.loads(feed_raw).get("items") == [],
+          "staging_https_customer_revoke_feed_empty", evidence, f"HTTP {status}")
+    detail_status, _ = request(prefix + "/api/listings/" + listing_id)
+    media_status, _ = request(prefix + "/media/" + media_id)
+    check(detail_status == 404 and media_status == 404,
+          "staging_https_customer_revoke_hides_detail_media", evidence,
+          f"detail HTTP {detail_status}; media HTTP {media_status}")
+    evidence["staging_customer_https"]["after_revoke"] = {"feed": status, "detail": detail_status, "media": media_status}
 
 
 def multipart(fields: dict[str, str], filename: str | None = None, content: bytes = b"",
@@ -248,6 +377,8 @@ def run_e2e() -> None:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     evidence: dict[str, Any] = {"source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}
+    staging_namespace = staging_customer_namespace()
+    evidence["staging_customer_namespace_enabled"] = staging_namespace is not None
     source_hashes = {}
     for relative in ("admin/admin_server.py", "customer_web_v2/sala_web.py", "customer_web_v2/projection_reader.py", "customer_web_v2/public_contract.py"):
         source_hashes[relative] = hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
@@ -590,6 +721,8 @@ def run_e2e() -> None:
         check(status == 200 and media_bytes == PNG and media_headers.get("Content-Type") == "image/png",
               "customer_http_approved_media", evidence, f"HTTP {status}")
         check(not customer_db.exists(), "customer_legacy_store_absent_during_public_reads", evidence)
+        publish_isolated_fixture_to_staging(staging_namespace, artifact_bytes, asset, property_id,
+                                            listing["listing_id"], media_id, evidence)
 
         # Real HTTP Customer -> relay -> Admin analytics, all events bound to the active publication.
         traffic_events = [
@@ -661,6 +794,7 @@ def run_e2e() -> None:
               json.loads(request(customer_origin + "/api/listings")[2]).get("items") == [],
               "customer_revoked_projection_empty", evidence)
         check(request(customer_origin + "/media/" + media_id)[0] == 404, "customer_revoked_media_hidden", evidence, "HTTP 404")
+        revoke_isolated_fixture_from_staging(staging_namespace, listing["listing_id"], media_id, evidence)
         status, _, revoked_event = json_call(customer_origin + "/api/analytics/events", method="POST",
                                               obj={**traffic_events[1], "event_id": str(uuid.uuid4())},
                                               headers={"Origin": customer_origin})

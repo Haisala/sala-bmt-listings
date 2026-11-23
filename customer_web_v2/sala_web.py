@@ -35,6 +35,7 @@ MAX_FILE = 4 * 1024 * 1024
 MAX_FILES = 8
 PBKDF2_ROUNDS = 310_000
 COOKIE_NAME = "sala_owner_session"
+TEST_NAMESPACE_PREFIX = "/__issue39_test__"
 ASSET_MAP = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -445,10 +446,21 @@ class Store:
 
 
 class Application:
-    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None, public_projection_path: str | Path | None = None, public_assets_root: str | Path | None = None, analytics_relay_url: str | None = None, test_mode: bool = False, legacy_owner_enabled: bool = True):
+    def __init__(self, db_path: str | Path, owner_password: str | None = None, allowed_origins: set[str] | None = None, frontend: Path = FRONTEND, owner_password_file: str | Path | None = None, public_projection_path: str | Path | None = None, public_assets_root: str | Path | None = None, analytics_relay_url: str | None = None, test_mode: bool = False, legacy_owner_enabled: bool = True, test_namespace_projection_path: str | Path | None = None, test_namespace_assets_root: str | Path | None = None, test_namespace_token: str | None = None):
         self.legacy_owner_enabled = legacy_owner_enabled
         self.store = Store(db_path) if legacy_owner_enabled else None
         self.public_read_model = PublicProjectionReader(public_projection_path, public_assets_root)
+        test_namespace_config = (test_namespace_projection_path, test_namespace_assets_root, test_namespace_token)
+        if any(value is not None for value in test_namespace_config):
+            if not all(value is not None for value in test_namespace_config):
+                raise AuthError("Test namespace configuration is incomplete")
+            if not isinstance(test_namespace_token, str) or len(test_namespace_token) < 32:
+                raise AuthError("Test namespace token is invalid")
+            self.test_namespace_reader = PublicProjectionReader(test_namespace_projection_path, test_namespace_assets_root)
+            self.test_namespace_token = test_namespace_token
+        else:
+            self.test_namespace_reader = None
+            self.test_namespace_token = None
         self.analytics_relay = AnalyticsRelay(analytics_relay_url, test_mode=test_mode)
         if not legacy_owner_enabled and (owner_password is not None or owner_password_file is not None):
             raise AuthError("Public Customer Web cannot configure a legacy Owner credential")
@@ -496,6 +508,34 @@ class Application:
     def _owner(self, headers: dict[str, str]) -> bool:
         return bool(self.legacy_owner_enabled and self.store and self.store.valid_session(self._cookie(headers)))
 
+    def _test_namespace(self, method: str, path: str, query: dict[str, list[str]], headers: dict[str, str]) -> Response:
+        """Read an isolated, authenticated projection namespace; never mutates public state."""
+        if self.test_namespace_reader is None or self.test_namespace_token is None:
+            return self._json_response(404, {"error": "Not found"})
+        if method != "GET":
+            return self._json_response(404, {"error": "Not found"})
+        supplied = headers.get("authorization", "")
+        scheme, _, credential = supplied.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(credential, self.test_namespace_token):
+            return self._json_response(401, {"error": "Test namespace authentication required"}, {"WWW-Authenticate": "Bearer"})
+        subpath = path[len(TEST_NAMESPACE_PREFIX):] or "/"
+        if subpath == "/health":
+            return self._json_response(200, {"ok": True, "storage": "isolated_test_projection"})
+        try:
+            if subpath == "/api/listings":
+                return self._json_response(200, {"items": self.test_namespace_reader.list_listings(query)})
+            match = re.fullmatch(r"/api/listings/([A-Za-z0-9-]+)", subpath)
+            if match:
+                item = self.test_namespace_reader.get_listing(match.group(1))
+                return self._json_response(200, item) if item else self._json_response(404, {"error": "Listing not found"})
+            match = re.fullmatch(r"/media/([A-Za-z0-9-]+)", subpath)
+            if match:
+                item = self.test_namespace_reader.media(match.group(1))
+                return self._response(200, item[1], item[0]) if item else self._json_response(404, {"error": "Media not found"})
+            return self._json_response(404, {"error": "Not found"})
+        except ProjectionUnavailable:
+            return self._json_response(503, {"error": "Test projection unavailable"})
+
     def handle(self, method: str, target: str, headers: dict[str, str] | None = None, body: bytes = b"", client_ip: str = "unknown") -> Response:
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         try:
@@ -506,6 +546,8 @@ class Application:
             return self._json_response(400, {"error": "Malformed request path"})
         if len(body) > MAX_REQUEST:
             return self._json_response(413, {"error": "Request too large"})
+        if path == TEST_NAMESPACE_PREFIX or path.startswith(TEST_NAMESPACE_PREFIX + "/"):
+            return self._test_namespace(method, path, query, headers)
         if method == "GET" and path == "/health":
             return self._json_response(200, {"ok": True, "storage": "admin_projection" if not self.legacy_owner_enabled else "sqlite"})
         if method == "GET" and path in ASSET_MAP:
@@ -639,6 +681,31 @@ def serve() -> None:
     owner_password_file = os.environ.get("SALA_OWNER_PASSWORD_FILE")
     if owner_password and owner_password_file:
         raise SystemExit("Configure exactly one Owner password source")
+    test_namespace_projection = None
+    test_namespace_assets = None
+    test_namespace_token = None
+    if os.environ.get("SALA_TEST_NAMESPACE_ENABLED") == "1":
+        root_value = os.environ.get("SALA_TEST_NAMESPACE_ROOT", "").strip()
+        if not root_value:
+            raise SystemExit("Test namespace root is not configured")
+        root = Path(root_value).expanduser()
+        if root.is_symlink() or not root.is_dir() or root.stat().st_uid != os.getuid() or stat.S_IMODE(root.stat().st_mode) != 0o700:
+            raise SystemExit("Test namespace root must be a private service-owned directory")
+        token_path = root / "control" / "bearer-token"
+        if token_path.is_symlink() or not token_path.is_file():
+            raise SystemExit("Test namespace token is unavailable")
+        token_info = token_path.stat()
+        if (token_info.st_uid != os.getuid() or stat.S_IMODE(token_info.st_mode) != 0o600
+                or not stat.S_ISREG(token_info.st_mode)):
+            raise SystemExit("Test namespace token file must be private and service-owned")
+        test_namespace_token = token_path.read_text(encoding="ascii").strip()
+        if len(test_namespace_token) < 32:
+            raise SystemExit("Test namespace token is invalid")
+        test_namespace_projection = root / "projection" / "listings.json"
+        test_namespace_assets = root
+        for directory in (test_namespace_projection.parent, root / "assets", token_path.parent):
+            if directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid != os.getuid() or stat.S_IMODE(directory.stat().st_mode) != 0o700:
+                raise SystemExit("Test namespace storage directories must be private and service-owned")
     app = Application(
         os.environ.get("SALA_DB_PATH", str(ROOT / "var" / "customer_web.sqlite3")), owner_password,
         set(filter(None, os.environ.get("SALA_ALLOWED_ORIGINS", "https://haisala.io.vn").split(","))),
@@ -648,6 +715,9 @@ def serve() -> None:
         analytics_relay_url=os.environ.get("SALA_ADMIN_ANALYTICS_URL") or None,
         test_mode=os.environ.get("SALA_ENV") == "test",
         legacy_owner_enabled=False,
+        test_namespace_projection_path=test_namespace_projection,
+        test_namespace_assets_root=test_namespace_assets,
+        test_namespace_token=test_namespace_token,
     )
 
     class Handler(BaseHTTPRequestHandler):
