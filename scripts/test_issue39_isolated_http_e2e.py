@@ -67,13 +67,6 @@ def request(url: str, *, method: str = "GET", data: bytes | None = None,
                     if request_headers.get(header_name, "").startswith(source):
                         request_headers[header_name] = external_origin + request_headers[header_name][len(source):]
             break
-    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(req, timeout=timeout) as response:
-            result = (response.status, dict(response.headers), response.read())
-    except urllib.error.HTTPError as exc:
-        result = (exc.code, dict(exc.headers), exc.read())
     if external_kind:
         result = curl_https_request(url, method=method, data=data, headers=request_headers, timeout=timeout)
         route = external_path.split("/")[1:3]
@@ -81,7 +74,14 @@ def request(url: str, *, method: str = "GET", data: bytes | None = None,
         counts = STAGING_HTTPS_STATUS_COUNTS[external_kind]
         status_key = str(result[0])
         counts[f"{route_key}={status_key}"] = counts.get(f"{route_key}={status_key}", 0) + 1
-    return result
+        return result
+    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as response:
+            return (response.status, dict(response.headers), response.read())
+    except urllib.error.HTTPError as exc:
+        return (exc.code, dict(exc.headers), exc.read())
 
 
 def curl_https_request(url: str, *, method: str = "GET", data: bytes | None = None,
