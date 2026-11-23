@@ -28,9 +28,9 @@ class Usage:
     def record(self,**kw):
         self.rows.append(kw);return {"status":"ESTIMATE_ONLY","usd_cost":"0.0001","tokens":kw["usage"]}
 
-def call(handler,intake_id,key):
+def call(handler,intake_id,key,payload=None):
     out={};handler.send_json=lambda value,status=200:out.update(value=value,status=status)
-    admin.Handler.create_content_from_intake(handler,intake_id,{"idempotency_key":key});return out
+    admin.Handler.create_content_from_intake(handler,intake_id,{"idempotency_key":key,**(payload or {})});return out
 
 def main():
   with tempfile.TemporaryDirectory(prefix="sala-one-touch-test-") as folder:
@@ -44,7 +44,7 @@ def main():
     pkg=center.packages[pkg["review_id"]]
     pkg["evidence_revisions"]=[{"evidence_revision_id":"TEST_ONLY-evidence-r1","evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture"}]}}]
     center._persist(pkg)
-    missing={"id":"TEST_ONLY-intake-no-rights","source":"TEST_ONLY","note":"TEST_ONLY synthetic source","media":[]}
+    missing={"id":"TEST_ONLY-intake-no-rights","source":"TEST_ONLY","note":"TEST_ONLY synthetic source with title: TEST_ONLY rental home","preliminaryFacts":{"title":"TEST_ONLY rental home","property_type":"HOUSE"},"media":[]}
     provider=Provider();usage=Usage()
     handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center)
     with patch.dict(os.environ,{"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":folder,"BMT_ADMIN_OWNER_ID":"owner"}), \
@@ -71,6 +71,14 @@ def main():
       denied=SimpleNamespace(owner_id=lambda:None,review_center_or_error=lambda:center,send_json=lambda v,status=200:None)
       denied_out=call(denied,intake["id"],"TEST_ONLY-anonymous-key-001")
       assert denied_out["status"]==403 and provider.calls==1
+      valid_evidence={"evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-owner-source","claim":"TEST_ONLY owner-confirmed synthetic source","rights_status":"PERSONAL"}]}}
+      generated=call(handler,missing["id"],"TEST_ONLY-evidence-idempotency-001",valid_evidence)
+      assert generated["status"]==201 and len(generated["value"]["variants"])==5 and provider.calls==2,generated
+      generated_review=center.packages[generated["value"]["review_id"]]
+      assert len(generated_review["evidence_revisions"])==1
+      assert generated_review["evidence_revisions"][0]["origin"]=="OWNER_CONFIRMED"
+      conflict=call(handler,missing["id"],"TEST_ONLY-evidence-conflict-001",{"evidence":{"rights_status":"COMPANY","citations":[{"source_id":"TEST_ONLY-other","claim":"TEST_ONLY different source","rights_status":"COMPANY"}]}})
+      assert conflict["status"]==409 and conflict["value"]["error"]=="EVIDENCE_REVISION_EXISTS" and provider.calls==2
     # Exercise the actual authenticated POST route over loopback with TEST_ONLY storage.
     import json, threading, urllib.error, urllib.request
     from http.server import ThreadingHTTPServer
@@ -114,5 +122,5 @@ def main():
     no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights)
     assert out["status"]=="BLOCKED" and no_rights.calls==0
     store.close()
-  print("PASS: authenticated loopback HTTP one-touch 201→5 private variants, replay 200 with 1 mock call/receipt, 0 Property Core writes/publish; direct negative checks for unauthorized, 4/6 outputs and missing rights")
+  print("PASS: authenticated loopback HTTP one-touch 201→5 private variants, replay 200; Owner evidence persisted once; missing/conflicting rights fail closed; 0 Property Core writes/publish")
 if __name__=="__main__":main()
