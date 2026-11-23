@@ -347,7 +347,9 @@ def run_e2e() -> None:
 
         status, _, owner_page = request(admin_origin + "/", headers=admin_headers)
         page_text = owner_page.decode("utf-8")
-        check(status == 200 and all(anchor in page_text for anchor in ("#intake-section", "#property-search", "#review-section", "#owner-analytics")),
+        check(status == 200 and all(anchor in page_text for anchor in ("#intake-section", "#property-search", "#review-section", "#owner-analytics"))
+              and '<a href="#review-section">Web Publish</a>' in page_text
+              and '<a href="#owner-analytics">Traffic</a>' in page_text,
               "owner_mobile_navigation_present", evidence, f"HTTP {status}")
         check("AI9 TEST ONLY" not in page_text and "Chạy AI9 TEST_ONLY" not in page_text and "local-only" not in page_text
               and "content-studio" not in page_text, "owner_test_controls_and_content_phase_hidden", evidence)
