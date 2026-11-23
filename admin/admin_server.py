@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import hashlib
+import http.client
 import hmac
 import ipaddress
 import json
@@ -32,7 +33,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 from property_memory.intake_review import process_intake
 from property_memory.providers.openai_provider import OpenAIPropertyProvider
 from property_memory.ai_gateway import AIGateway
@@ -1105,9 +1106,90 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "BMTAdmin/0.1"
 
     def log_message(self, fmt: str, *args: object) -> None:
-        if urlparse(getattr(self, "path", "")).path == "/api/analytics/events":
+        request_path = urlparse(getattr(self, "path", "")).path
+        if request_path == "/api/analytics/events" or request_path.startswith("/__issue39_test_admin__"):
             return
         print(f"{self.address_string()} - {fmt % args}", flush=True)
+
+    def issue39_test_proxy(self) -> bool:
+        """Bearer-gated HTTPS path to a loopback-only isolated Admin test process."""
+        prefix = "/__issue39_test_admin__"
+        original = urlsplit(self.path)
+        if original.path != prefix and not original.path.startswith(prefix + "/"):
+            return False
+        if os.environ.get("BMT_ENV", "") != "staging":
+            self.send_json({"error": "Not found"}, 404)
+            return True
+        port_value = os.environ.get("BMT_TEST_NAMESPACE_PROXY_PORT", "").strip()
+        token_path_value = os.environ.get("BMT_TEST_NAMESPACE_TOKEN_FILE", "").strip()
+        if not port_value or not token_path_value:
+            self.send_json({"error": "Not found"}, 404)
+            return True
+        try:
+            port = int(port_value)
+            token_path = Path(token_path_value)
+            parent = token_path.parent
+            namespace_root = parent.parent
+            token_info = token_path.stat()
+            if (port < 49152 or port > 65535
+                    or token_path.is_symlink() or parent.is_symlink()
+                    or namespace_root.is_symlink() or namespace_root.stat().st_uid != os.getuid()
+                    or namespace_root.stat().st_mode & 0o777 != 0o700
+                    or parent.stat().st_uid != os.getuid() or parent.stat().st_mode & 0o077
+                    or token_info.st_uid != os.getuid() or token_info.st_mode & 0o077
+                    or not token_path.is_file()):
+                raise ValueError
+            token = token_path.read_text(encoding="ascii").strip()
+            if len(token) < 32:
+                raise ValueError
+        except (OSError, ValueError):
+            self.send_json({"error": "Test namespace unavailable"}, 503)
+            return True
+        scheme, _, supplied = self.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not secrets.compare_digest(supplied, token):
+            self.send_json({"error": "Test namespace authentication required"}, 401,
+                           headers={"WWW-Authenticate": "Bearer"})
+            return True
+        if self.command not in {"GET", "POST", "DELETE"}:
+            self.send_json({"error": "Method not allowed"}, 405, headers={"Allow": "GET, POST, DELETE"})
+            return True
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            self.send_json({"error": "Invalid request length"}, 400)
+            return True
+        if length < 0 or length > MAX_BODY or self.headers.get("Transfer-Encoding"):
+            self.send_json({"error": "Request length rejected"}, 413)
+            return True
+        body = self.rfile.read(length) if length else None
+        forwarded = {key: value for key, value in self.headers.items()
+                     if key.lower() in {"accept", "content-type", "origin", "referer", "cookie", "x-requested-with"}
+                     or key.lower().startswith("x-idempotency-") or key.lower().startswith("x-test-")
+                     or key.lower().startswith("x-owner-")}
+        target_path = original.path[len(prefix):] or "/"
+        if original.query:
+            target_path += "?" + original.query
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        try:
+            connection.request(self.command, target_path, body=body, headers=forwarded)
+            upstream = connection.getresponse()
+            payload = upstream.read(MAX_BODY + 1)
+            if len(payload) > MAX_BODY:
+                self.send_json({"error": "Test namespace response too large"}, 502)
+                return True
+            self.send_response(upstream.status)
+            for key, value in upstream.getheaders():
+                if key.lower() in {"content-type", "cache-control", "set-cookie", "location", "www-authenticate", "allow"}:
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+        except OSError:
+            self.send_json({"error": "Isolated test Admin unavailable"}, 502)
+        finally:
+            connection.close()
+        return True
 
     def send_json(self, value: object, status: int = 200, *, headers: dict[str, str] | None = None) -> None:
         body = json_bytes(value)
@@ -1924,6 +2006,8 @@ class Handler(BaseHTTPRequestHandler):
         return f"bmt_admin_session={value}; Max-Age={max_age}; HttpOnly; SameSite=Strict; Path=/{secure}"
 
     def do_GET(self) -> None:
+        if self.issue39_test_proxy():
+            return
         path = urlparse(self.path).path
         if path == "/api/health":
             self.runtime_json(); return
@@ -2015,6 +2099,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_DELETE(self) -> None:
+        if self.issue39_test_proxy():
+            return
         """Staging-only cleanup for explicitly identified synthetic fixtures."""
         if not self.require_trusted_origin():
             return
@@ -2074,7 +2160,14 @@ class Handler(BaseHTTPRequestHandler):
                      idempotency_key=f"cleanup:{intake_id}")
         self.send_json({"id": intake_id, "status": "REMOVED" if record or review_status == "REMOVED" else "ALREADY_ABSENT"})
 
+    def do_PUT(self) -> None:
+        if self.issue39_test_proxy():
+            return
+        self.send_error(501)
+
     def do_POST(self) -> None:
+        if self.issue39_test_proxy():
+            return
         path = urlparse(self.path).path
         if path == "/api/analytics/events":
             self.analytics_event_post()

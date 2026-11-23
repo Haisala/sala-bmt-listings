@@ -701,9 +701,18 @@ def serve() -> None:
         test_namespace_token = token_path.read_text(encoding="ascii").strip()
         if len(test_namespace_token) < 32:
             raise SystemExit("Test namespace token is invalid")
-        test_namespace_projection = root / "projection" / "listings.json"
-        test_namespace_assets = root
-        for directory in (test_namespace_projection.parent, root / "assets", token_path.parent):
+        projection_relative = Path(os.environ.get("SALA_TEST_NAMESPACE_PROJECTION_RELATIVE", "projection/listings.json"))
+        if (projection_relative.is_absolute() or any(part in {"", ".", ".."} for part in projection_relative.parts)
+                or projection_relative.as_posix() not in {"projection/listings.json", "admin-test-root/public-preview/data/listings.json"}):
+            raise SystemExit("Test namespace projection path is invalid")
+        test_namespace_projection = root / projection_relative
+        assets_relative = os.environ.get("SALA_TEST_NAMESPACE_ASSETS_RELATIVE", ".").strip()
+        if assets_relative not in {".", "admin-test-root/public-assets"}:
+            raise SystemExit("Test namespace asset path is invalid")
+        test_namespace_assets = root if assets_relative == "." else root / assets_relative
+        projection_dirs = [root.joinpath(*projection_relative.parts[:index]) for index in range(1, len(projection_relative.parts))]
+        asset_required = root / "assets" if assets_relative == "." else root / "admin-test-root" / "public-assets"
+        for directory in (*projection_dirs, asset_required, token_path.parent):
             if directory.is_symlink() or not directory.is_dir() or directory.stat().st_uid != os.getuid() or stat.S_IMODE(directory.stat().st_mode) != 0o700:
                 raise SystemExit("Test namespace storage directories must be private and service-owned")
     app = Application(

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import selectors
 import signal
 import socket
@@ -27,6 +28,12 @@ ORIGIN_LABEL = "TEST_ONLY"
 PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082")
 
 
+STAGING_ADMIN_REWRITE: tuple[str, str, str, str] | None = None
+STAGING_CUSTOMER_REWRITE: tuple[str, str, str, str] | None = None
+STAGING_HTTPS_STATUS_COUNTS: dict[str, dict[str, int]] = {"admin": {}, "customer": {}}
+HTTPS_REQUEST_TEMP_ROOT: Path | None = None
+
+
 class E2EFailure(AssertionError):
     pass
 
@@ -39,13 +46,89 @@ def check(condition: bool, label: str, evidence: dict[str, Any], status: str | N
 
 def request(url: str, *, method: str = "GET", data: bytes | None = None,
             headers: dict[str, str] | None = None, timeout: float = 8.0) -> tuple[int, dict[str, str], bytes]:
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    request_headers = dict(headers or {})
+    external_kind = None
+    external_path = ""
+    for mapping in (STAGING_ADMIN_REWRITE, STAGING_CUSTOMER_REWRITE):
+        if mapping is None:
+            continue
+        source, external_origin, prefix, token = mapping
+        if url.startswith(source + "/"):
+            path = url[len(source):]
+            if mapping is STAGING_CUSTOMER_REWRITE and not (
+                    path.startswith("/api/listings") or path.startswith("/media/")):
+                continue
+            url = external_origin + prefix + path
+            request_headers["Authorization"] = f"Bearer {token}"
+            external_kind = "admin" if mapping is STAGING_ADMIN_REWRITE else "customer"
+            external_path = path.split("?", 1)[0]
+            if mapping is STAGING_ADMIN_REWRITE:
+                for header_name in ("Origin", "Referer"):
+                    if request_headers.get(header_name, "").startswith(source):
+                        request_headers[header_name] = external_origin + request_headers[header_name][len(source):]
+            break
+    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(req, timeout=timeout) as response:
-            return response.status, dict(response.headers), response.read()
+            result = (response.status, dict(response.headers), response.read())
     except urllib.error.HTTPError as exc:
-        return exc.code, dict(exc.headers), exc.read()
+        result = (exc.code, dict(exc.headers), exc.read())
+    if external_kind:
+        result = curl_https_request(url, method=method, data=data, headers=request_headers, timeout=timeout)
+        route = external_path.split("/")[1:3]
+        route_key = "/" + "/".join(route)
+        counts = STAGING_HTTPS_STATUS_COUNTS[external_kind]
+        status_key = str(result[0])
+        counts[f"{route_key}={status_key}"] = counts.get(f"{route_key}={status_key}", 0) + 1
+    return result
+
+
+def curl_https_request(url: str, *, method: str = "GET", data: bytes | None = None,
+                       headers: dict[str, str] | None = None, timeout: float = 20.0) -> tuple[int, dict[str, str], bytes]:
+    if HTTPS_REQUEST_TEMP_ROOT is None or HTTPS_REQUEST_TEMP_ROOT.is_symlink() or (HTTPS_REQUEST_TEMP_ROOT.stat().st_mode & 0o777) != 0o700:
+        raise E2EFailure("HTTPS_REQUEST_TEMP_ROOT_NOT_PRIVATE")
+    created: list[Path] = []
+
+    def private_file(prefix: str, payload: bytes = b"") -> Path:
+        fd, name = tempfile.mkstemp(prefix=prefix, dir=HTTPS_REQUEST_TEMP_ROOT)
+        path = Path(name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+        created.append(path)
+        return path
+
+    def quote(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n") + '"'
+
+    body_path = private_file("issue39-request-body-", data or b"") if data is not None else None
+    header_path = private_file("issue39-response-headers-")
+    output_path = private_file("issue39-response-body-")
+    lines = [f"url = {quote(url)}", f"request = {quote(method)}", f"max-time = {quote(str(timeout))}",
+             "silent", "show-error", f"dump-header = {quote(str(header_path))}",
+             f"output = {quote(str(output_path))}", 'write-out = "%{http_code}"']
+    for name, value in (headers or {}).items():
+        lines.append(f"header = {quote(name + ': ' + value)}")
+    if body_path is not None:
+        lines.append(f"data-binary = {quote('@' + str(body_path))}")
+    try:
+        completed = subprocess.run(["curl", "--config", "-"], input=("\n".join(lines) + "\n").encode("utf-8"),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout + 2)
+        if completed.returncode or not completed.stdout.strip().isdigit():
+            raise E2EFailure("STAGING_HTTPS_REQUEST_FAILED")
+        raw_headers = header_path.read_bytes()
+        blocks = [part for part in raw_headers.split(b"\r\n\r\n") if part.strip()]
+        response_headers: dict[str, str] = {}
+        if blocks:
+            for line in blocks[-1].split(b"\r\n")[1:]:
+                name, sep, value = line.partition(b":")
+                if sep:
+                    response_headers[name.decode("latin-1").strip()] = value.decode("latin-1").strip()
+        return int(completed.stdout.strip()), response_headers, output_path.read_bytes()
+    finally:
+        for path in created:
+            path.unlink(missing_ok=True)
 
 
 def json_call(url: str, *, method: str = "GET", obj: Any = None,
@@ -93,9 +176,21 @@ def staging_customer_namespace() -> dict[str, Any] | None:
     token = token_file.read_text(encoding="ascii").strip()
     if len(token) < 32:
         raise E2EFailure("STAGING_TEST_TOKEN_INVALID")
-    for directory in (root / "projection", root / "assets", root / "control"):
+    connected_admin = os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip()
+    projection_relative = "admin-test-root/public-preview/data/listings.json" if connected_admin else "projection/listings.json"
+    asset_relative = "admin-test-root/public-assets" if connected_admin else "assets"
+    required_dirs = [root / asset_relative, root / "control"]
+    required_dirs.extend([root / "admin-test-root", root / "admin-test-root" / "public-preview",
+                          root / "admin-test-root" / "public-preview" / "canonical",
+                          root / "admin-test-root" / "public-preview" / "data",
+                          root / "admin-test-root" / "public-assets"]
+                         if connected_admin else [root / "projection"])
+    for directory in required_dirs:
         if not directory.is_dir() or directory.is_symlink() or directory.stat().st_mode & 0o077:
             raise E2EFailure("STAGING_TEST_STORAGE_NOT_PRIVATE")
+    projection_path = root / projection_relative
+    if connected_admin and (projection_path.exists() or any((root / "admin-test-root" / "public-assets").rglob("*"))):
+        raise E2EFailure("STAGING_TEST_NAMESPACE_NOT_EMPTY")
 
     def https_get(path: str, *, auth_token: str | None = token) -> tuple[int, bytes]:
         if not path.startswith("/") or "\r" in path or "\n" in path:
@@ -116,9 +211,29 @@ def staging_customer_namespace() -> dict[str, Any] | None:
             raise E2EFailure("STAGING_TEST_HTTPS_STATUS_MISSING")
         return int(tail.strip()), body
 
-    return {"root": root, "projection": root / "projection" / "listings.json", "assets_dir": root / "assets",
-            "asset": root / "assets" / "images" / "test-only-http-home" / "front.png",
+    asset_root = root / asset_relative
+    return {"root": root, "projection": projection_path, "assets_dir": asset_root,
+            "asset_for": lambda ref: asset_root / Path(*ref.split("/")),
             "https_get": https_get}
+
+
+def _private_bearer_from_env(key: str, expected_origin: str) -> tuple[str, str] | None:
+    origin = os.environ.get(key + "_ORIGIN", "").strip()
+    token_value = os.environ.get(key + "_TOKEN_FILE", "").strip()
+    if not origin and not token_value:
+        return None
+    if not origin or not token_value or origin != expected_origin:
+        raise E2EFailure("STAGING_HTTPS_NAMESPACE_CONFIG_INVALID")
+    token_path = Path(token_value).expanduser()
+    if token_path.is_symlink():
+        raise E2EFailure("STAGING_TEST_PATH_SYMLINK_REJECTED")
+    info = token_path.stat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o077 or not token_path.is_file():
+        raise E2EFailure("STAGING_TEST_TOKEN_NOT_PRIVATE")
+    token = token_path.read_text(encoding="ascii").strip()
+    if len(token) < 32:
+        raise E2EFailure("STAGING_TEST_TOKEN_INVALID")
+    return origin, token
 
 
 def publish_isolated_fixture_to_staging(namespace: dict[str, Any] | None, artifact: bytes,
@@ -128,7 +243,45 @@ def publish_isolated_fixture_to_staging(namespace: dict[str, Any] | None, artifa
     if namespace is None:
         return
     projection = namespace["projection"]
-    asset = namespace["asset"]
+    rows = json.loads(artifact)
+    image_ref = rows[0]["images"][0] if rows and rows[0].get("images") else ""
+    if not image_ref.startswith("assets/images/") or ".." in Path(image_ref).parts:
+        raise E2EFailure("STAGING_TEST_MEDIA_REF_INVALID")
+    asset = namespace["asset_for"](image_ref)
+    if os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip():
+        if not projection.is_file() or projection.read_bytes() != artifact or not asset.is_file():
+            raise E2EFailure("HTTPS_ADMIN_ARTIFACT_NOT_CONNECTED_TO_CUSTOMER_NAMESPACE")
+        request = namespace["https_get"]
+        prefix = "/__issue39_test__"
+        unauth = request(prefix + "/api/listings", auth_token=None)[0]
+        bad_auth = request(prefix + "/api/listings", auth_token="invalid-test-token")[0]
+        check(unauth == 401 and bad_auth == 401, "staging_test_namespace_auth_denied", evidence,
+              f"no-token HTTP {unauth}; bad-token HTTP {bad_auth}")
+        health_status, health_raw = request(prefix + "/health")
+        health = json.loads(health_raw)
+        check(health_status == 200 and health.get("storage") == "isolated_test_projection",
+              "staging_https_customer_namespace_health", evidence, f"HTTP {health_status}")
+        status, feed_raw = request(prefix + "/api/listings")
+        feed = json.loads(feed_raw)
+        check(status == 200 and len(feed.get("items", [])) == 1, "staging_https_customer_feed", evidence, f"HTTP {status}")
+        listing = feed["items"][0]
+        check(listing.get("property_id") == expected_property_id and listing.get("listing_id") == expected_listing_id,
+              "staging_https_customer_identity", evidence)
+        status, search_raw = request(prefix + "/api/listings?q=TEST_ONLY")
+        check(status == 200 and len(json.loads(search_raw).get("items", [])) == 1,
+              "staging_https_customer_search", evidence, f"HTTP {status}")
+        status, detail_raw = request(prefix + "/api/listings/" + expected_listing_id)
+        detail = json.loads(detail_raw)
+        check(status == 200 and detail.get("property_id") == expected_property_id
+              and detail.get("property_revision") == 1 and "owner_contact" not in detail,
+              "staging_https_customer_detail_private_allowlist", evidence, f"HTTP {status}")
+        status, media = request(prefix + "/media/" + expected_media_id)
+        check(status == 200 and hashlib.sha256(media).hexdigest() == hashlib.sha256(PNG).hexdigest(),
+              "staging_https_customer_approved_media", evidence, f"HTTP {status}")
+        evidence["staging_customer_https"] = {"origin": "web-staging.haisala.io.vn", "feed": 200,
+            "search": 200, "detail": 200, "media": 200, "no_auth": unauth, "invalid_auth": bad_auth,
+            "health": health_status, "artifact_sha256": hashlib.sha256(artifact).hexdigest(), "projection_from_admin_https": True}
+        return
     if projection.exists() or asset.exists() or any(namespace["assets_dir"].rglob("*")):
         raise E2EFailure("STAGING_TEST_NAMESPACE_NOT_EMPTY")
     temp_projection = projection.with_name(".listings.json.issue39-tmp")
@@ -175,8 +328,16 @@ def revoke_isolated_fixture_from_staging(namespace: dict[str, Any] | None, listi
                                          media_id: str, evidence: dict[str, Any]) -> None:
     if namespace is None:
         return
-    namespace["projection"].write_text("[]", encoding="utf-8")
-    namespace["projection"].chmod(0o600)
+    if os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip():
+        try:
+            rows = json.loads(namespace["projection"].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise E2EFailure("HTTPS_ADMIN_REVOKE_ARTIFACT_INVALID") from exc
+        if rows:
+            raise E2EFailure("HTTPS_ADMIN_REVOKE_DID_NOT_WITHDRAW_PROJECTION")
+    else:
+        namespace["projection"].write_text("[]", encoding="utf-8")
+        namespace["projection"].chmod(0o600)
     request = namespace["https_get"]
     prefix = "/__issue39_test__"
     status, feed_raw = request(prefix + "/api/listings")
@@ -253,23 +414,34 @@ def child_env(root: Path, mode: str, port: int = 0, *, customer_port: int = 0, a
         "PYTHONPATH": str(ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
-        "TMPDIR": str(root / "tmp"),
+        "TMPDIR": os.environ.get("ISSUE39_ADMIN_TEST_TMPDIR", str(root / "tmp")) if mode == "admin" else str(root / "tmp"),
         "SALA_E2E_ROOT": str(root),
         "SALA_E2E_MODE": mode,
     }
     if mode == "admin":
+        connected_admin_origin = os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip()
+        isolated_namespace_root = os.environ.get("ISSUE39_STAGING_TEST_NAMESPACE_ROOT", "").strip()
+        isolated_staging_root = os.environ.get("ISSUE39_ADMIN_TEST_STAGING_ROOT", "").strip()
+        if not isolated_staging_root:
+            isolated_staging_root = (str(Path(isolated_namespace_root) / "admin-test-root") if connected_admin_origin
+                                     and isolated_namespace_root else str(root / "admin-staging"))
+        isolated_preview_root = os.environ.get("ISSUE39_ADMIN_TEST_PREVIEW_ROOT", "").strip() or (
+            str(Path(isolated_staging_root) / "public-preview") if connected_admin_origin else str(root / "tmp" / "admin-preview"))
+        isolated_assets_root = os.environ.get("ISSUE39_ADMIN_TEST_ASSETS_ROOT", "").strip() or str(Path(isolated_staging_root) / "public-assets")
         env.update({
             "BMT_ADMIN_PRIVATE_ROOT": str(root / "admin-private"),
-            "BMT_ADMIN_PREVIEW_ROOT": str(root / "tmp" / "admin-preview"),
+            "BMT_ADMIN_PREVIEW_ROOT": isolated_preview_root,
+            "BMT_ADMIN_STAGING_ROOT": isolated_staging_root,
+            "BMT_ADMIN_PUBLIC_ASSETS_ROOT": isolated_assets_root,
             "BMT_ADMIN_HOST": "127.0.0.1",
             "BMT_ADMIN_PORT": str(port),
-            "BMT_ADMIN_PUBLIC_ORIGIN": "",
-            "BMT_ADMIN_ALLOWED_IP": "",
+            "BMT_ADMIN_PUBLIC_ORIGIN": connected_admin_origin,
+            "BMT_ADMIN_ALLOWED_IP": "127.0.0.1" if connected_admin_origin else "",
             "BMT_ADMIN_OWNER_ID": "TEST_ONLY_OWNER",
             "BMT_ADMIN_PASSWORD_FILE": str(root / "admin-owner-password"),
             "BMT_ADMIN_LOCAL_HTTP_DEV": "1",
-            "BMT_ADMIN_SECURE_COOKIE": "0",
-            "BMT_ENV": "test",
+            "BMT_ADMIN_SECURE_COOKIE": "1" if connected_admin_origin else "0",
+            "BMT_ENV": "staging" if connected_admin_origin else "test",
             "BMT_TEST_ONLY": "1",
             "BMT_OPENAI_EXTRACTION": "0",
             "BMT_OPENAI_CONTENT_LIVE": "0",
@@ -277,17 +449,29 @@ def child_env(root: Path, mode: str, port: int = 0, *, customer_port: int = 0, a
             "BMT_AUTH_DIAGNOSTIC_ACTIVATION_FILE": str(root / "no-auth-diagnostic-activation"),
             "BMT_AUTH_DIAGNOSTIC_MARKER_FILE": str(root / "no-auth-diagnostic-marker"),
         })
+        if connected_admin_origin:
+            env["BMT_TEST_ONLY"] = "1"
+        if os.environ.get("ISSUE39_ADMIN_TEST_CHILD_PORT", "").strip():
+            env["BMT_ADMIN_PORT"] = os.environ["ISSUE39_ADMIN_TEST_CHILD_PORT"].strip()
     else:
+        connected_admin_origin = os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip()
+        test_namespace_root = os.environ.get("ISSUE39_STAGING_TEST_NAMESPACE_ROOT", "").strip()
+        test_assets_root = os.environ.get("ISSUE39_ADMIN_TEST_ASSETS_ROOT", "").strip() or str(root / "admin-staging" / "public-assets")
         env.update({
             "SALA_BIND_HOST": "127.0.0.1",
             "SALA_PORT": str(port),
             "SALA_DB_PATH": str(root / "customer-private" / "unused.sqlite3"),
             "SALA_ALLOWED_ORIGINS": "",
             "SALA_PUBLIC_PROJECTION_PATH": str(root / "tmp" / "admin-preview" / "data" / "listings.json"),
-            "SALA_PUBLIC_ASSETS_ROOT": str(root / "public-assets"),
+            "SALA_PUBLIC_ASSETS_ROOT": test_assets_root,
             "SALA_ADMIN_ANALYTICS_URL": admin_url or "",
             "SALA_ENV": "test",
         })
+        if connected_admin_origin and test_namespace_root:
+            env["SALA_TEST_NAMESPACE_ENABLED"] = "1"
+            env["SALA_TEST_NAMESPACE_ROOT"] = test_namespace_root
+            env["SALA_TEST_NAMESPACE_PROJECTION_RELATIVE"] = "admin-test-root/public-preview/data/listings.json"
+            env["SALA_TEST_NAMESPACE_ASSETS_RELATIVE"] = "admin-test-root/public-assets"
     return env
 
 
@@ -302,7 +486,9 @@ def run_child() -> None:
         from property_memory import PropertyStore
         from property_memory.review_center import ReviewCenter
 
-        assets = root / "public-assets"
+        assets = Path(os.environ.get("BMT_ADMIN_PUBLIC_ASSETS_ROOT") or (root / "public-assets"))
+        staging_root = Path(os.environ.get("BMT_ADMIN_STAGING_ROOT") or (root / "admin-staging"))
+        staging_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         assets.mkdir(mode=0o700, parents=True, exist_ok=True)
         projection_builder.PROJECT_ROOT = assets
         private = root / "admin-private"
@@ -314,7 +500,7 @@ def run_child() -> None:
         server = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("BMT_ADMIN_PORT", "0"))), adm.Handler)
         server.daemon_threads = True
         adm.PORT = server.server_address[1]
-        origin = f"http://127.0.0.1:{adm.PORT}"
+        origin = os.environ.get("BMT_ADMIN_PUBLIC_ORIGIN", "").strip() or f"http://127.0.0.1:{adm.PORT}"
         os.environ["BMT_ADMIN_PORT"] = str(adm.PORT)
         os.environ["BMT_ADMIN_PUBLIC_ORIGIN"] = origin
         ready = {"event": "READY", "role": "admin", "pid": os.getpid(), "host": "127.0.0.1", "port": adm.PORT}
@@ -372,12 +558,15 @@ def run_child() -> None:
 
 
 def run_e2e() -> None:
+    global STAGING_ADMIN_REWRITE, STAGING_CUSTOMER_REWRITE, HTTPS_REQUEST_TEMP_ROOT
     # Running a script by filename places ``scripts/`` at sys.path[0]; add the
     # checkout root explicitly so the parent harness can inspect its isolated DB.
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     evidence: dict[str, Any] = {"source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}
     staging_namespace = staging_customer_namespace()
+    if os.environ.get("ISSUE39_STAGING_ADMIN_ORIGIN", "").strip() and staging_namespace is None:
+        raise E2EFailure("CONNECTED_STAGING_NAMESPACES_REQUIRED")
     evidence["staging_customer_namespace_enabled"] = staging_namespace is not None
     source_hashes = {}
     for relative in ("admin/admin_server.py", "customer_web_v2/sala_web.py", "customer_web_v2/projection_reader.py", "customer_web_v2/public_contract.py"):
@@ -405,28 +594,38 @@ def run_e2e() -> None:
     original_listeners = listener_map()
     evidence["existing_listeners_before"] = original_listeners
 
-    temp = tempfile.TemporaryDirectory(prefix="sala-issue39-http-e2e-", dir="/private/tmp")
+    configured_parent = os.environ.get("ISSUE39_TEST_ROOT_PARENT", "").strip()
+    temp_parent = configured_parent or "/private/tmp"
+    parent_path = Path(temp_parent).expanduser()
+    if (parent_path.is_symlink() or not parent_path.is_dir()
+            or (configured_parent and (parent_path.stat().st_uid != os.getuid() or parent_path.stat().st_mode & 0o077))):
+        raise E2EFailure("TEST_ROOT_PARENT_NOT_PRIVATE")
+    temp = tempfile.TemporaryDirectory(prefix="sala-issue39-http-e2e-", dir=str(parent_path))
     root = Path(temp.name)
     root.chmod(0o700)
+    HTTPS_REQUEST_TEMP_ROOT = root
     tmp_root = root / "tmp"
     tmp_root.mkdir(mode=0o700)
-    for name in ("admin-private", "public-assets"):
+    for name in ("admin-private",):
         (root / name).mkdir(mode=0o700)
     (root / "admin-owner-password").write_text(OWNER_PASSWORD, encoding="utf-8")
     (root / "admin-owner-password").chmod(0o600)
-    asset = root / "public-assets" / "assets" / "images" / "test-only-http-home" / "front.png"
-    asset.parent.mkdir(mode=0o700, parents=True)
-    asset.write_bytes(PNG)
-    asset.chmod(0o600)
-    evidence["isolation"] = {"root_mode": oct(root.stat().st_mode & 0o777), "paths": ["/private/tmp/<isolated-run>/{tmp,admin-private,public-assets}"], "real_paths_opened": False}
+    evidence["isolation"] = {"root_mode": oct(root.stat().st_mode & 0o777), "paths": ["/private/tmp/<isolated-run>/{tmp,admin-private,admin-staging}"], "real_paths_opened": False}
 
     admin = customer = None
     store = None
     try:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        probe.bind(("127.0.0.1", 0))
-        customer_port = probe.getsockname()[1]
-        probe.close()
+        assigned_admin_port = os.environ.get("ISSUE39_ADMIN_TEST_CHILD_PORT", "").strip()
+        if assigned_admin_port:
+            customer_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            customer_probe.bind(("127.0.0.1", 0))
+            customer_port = customer_probe.getsockname()[1]
+            customer_probe.close()
+        else:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", 0))
+            customer_port = probe.getsockname()[1]
+            probe.close()
         admin = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--child"], cwd=ROOT,
                                  env=child_env(root, "admin", customer_port=customer_port), stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -438,6 +637,22 @@ def run_e2e() -> None:
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         customer_ready = read_ready(customer)
         customer_origin = f"http://127.0.0.1:{customer_ready['port']}"
+        admin_proxy = _private_bearer_from_env("ISSUE39_STAGING_ADMIN", "https://admin-next.haisala.io.vn")
+        if admin_proxy:
+            admin_external, admin_token = admin_proxy
+            admin_prefix = "/__issue39_test_admin__"
+            admin_no_token = curl_https_request(admin_external + admin_prefix + "/api/health")[0]
+            check(admin_no_token == 401, "admin_staging_test_namespace_no_auth_denied", evidence, f"HTTP {admin_no_token}")
+            admin_bad_token = curl_https_request(admin_external + admin_prefix + "/api/health",
+                                                 headers={"Authorization": "Bearer invalid-test-token"})[0]
+            check(admin_bad_token == 401, "admin_staging_test_namespace_invalid_auth_denied", evidence,
+                  f"HTTP {admin_bad_token}")
+            STAGING_ADMIN_REWRITE = (admin_origin, admin_external, admin_prefix, admin_token)
+        customer_token_file = os.environ.get("ISSUE39_STAGING_TEST_NAMESPACE_TOKEN_FILE", "").strip()
+        if admin_proxy and customer_token_file:
+            customer_token = _private_bearer_from_env("ISSUE39_STAGING_CUSTOMER", "https://web-staging.haisala.io.vn")
+            if customer_token:
+                STAGING_CUSTOMER_REWRITE = (customer_origin, customer_token[0], "/__issue39_test__", customer_token[1])
         evidence["processes"] = {"admin": admin_ready, "customer": customer_ready}
         evidence["ports"] = [admin_ready["port"], customer_ready["port"]]
         config_fingerprint = {
@@ -550,13 +765,13 @@ def run_e2e() -> None:
         check(status == 200, "same_filename_exact_fixture_cleanup", evidence, f"HTTP {status}")
         intake_headers = {**admin_headers, "Content-Type": content_type, "X-Idempotency-Key": "TEST_ONLY-intake-e2e-01"}
         intake_fields = {"source": "Cá nhân", "sourceGroup": "TEST_ONLY", "note": "TEST_ONLY synthetic Admin-to-Web E2E property"}
-        content_type, body = multipart(intake_fields)
+        content_type, body = multipart(intake_fields, files=[("TEST_ONLY-source-front.png", PNG)])
         intake_headers["Content-Type"] = content_type
         status, _, intake_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=intake_headers)
         intake = json.loads(intake_raw)
-        check(status == 201 and intake.get("status") == "RECEIVED" and intake.get("media") == []
-              and intake.get("upload", {}).get("accepted") == 0,
-              "admin_http_note_only_intake", evidence, f"HTTP {status}")
+        check(status == 201 and intake.get("status") == "RECEIVED" and len(intake.get("media", [])) == 1
+              and intake.get("upload", {}).get("accepted") == 1,
+              "admin_https_source_media_intake", evidence, f"HTTP {status}")
         status, _, disabled_content = json_call(admin_origin + f"/api/intakes/{intake['id']}/create-content",
                                                  method="POST", obj={"idempotency_key":"TEST_ONLY-disabled-content-01"},
                                                  headers=admin_headers)
@@ -564,7 +779,7 @@ def run_e2e() -> None:
               "staging_content_provider_remains_disabled", evidence, f"HTTP {status}")
         status, _, replay_raw = request(admin_origin + "/api/intakes", method="POST", data=body, headers=intake_headers)
         replay = json.loads(replay_raw)
-        check(status == 200 and replay.get("id") == intake.get("id") and replay.get("upload", {}).get("accepted") == 0
+        check(status == 200 and replay.get("id") == intake.get("id") and replay.get("upload", {}).get("accepted") == 1
               and replay.get("upload", {}).get("duplicate_count") == 0,
               "admin_intake_replay_single_record", evidence, f"HTTP {status}")
         status, _, denied_process = request(admin_origin + f"/api/intakes/{intake['id']}/process", method="POST",
@@ -660,11 +875,8 @@ def run_e2e() -> None:
 
         appearances = store.list_source_appearances(property_id)
         check(len(store.list_properties()) == 1 and len(appearances) == 1, "synthetic_property_core_singleton", evidence)
+        check(bool(store.list_media_history(property_id)), "intake_media_provenance_reached_property_core", evidence)
         appearance_id = appearances[0]["appearance_id"]
-        media_ref = "assets/images/test-only-http-home/front.png"
-        store.append_media_observation(property_id, {"appearance_id": appearance_id, "media_ref": media_ref,
-                                                     "media_sha256": hashlib.sha256(PNG).hexdigest(), "role": "front",
-                                                     "rights_status": "PERSONAL", "active": True}, event_id="TEST_ONLY-public-media-e2e-01")
         release_payload = {"property_id": property_id, "expected_review_revision": revision,
                            "expected_property_revision": 1, "idempotency_key": "TEST_ONLY-web-publish-e2e-01"}
         status, _, blocked = json_call(admin_origin + f"/api/reviews/{review_id}/public-release/approve", method="POST",
@@ -673,23 +885,66 @@ def run_e2e() -> None:
         status, _, _ = request(customer_origin + "/api/listings")
         check(status == 503, "rights_blocked_no_customer_projection", evidence, f"HTTP {status}")
 
-        asset = root / "public-assets" / media_ref
-        asset.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        asset.write_bytes(PNG)
-        asset.chmod(0o600)
-        store.add_rights(property_id, {"appearance_id": appearance_id, "rights_status": "PERSONAL", "channel": "public_web", "approved": True}, rights_id="TEST_ONLY-rights-e2e-01")
+        if STAGING_ADMIN_REWRITE is not None:
+            rights_payload = {"property_id": property_id, "appearance_id": appearance_id,
+                              "expected_property_revision": 1, "rights_status": "PERSONAL"}
+            status, _, rights = json_call(admin_origin + f"/api/reviews/{review_id}/media-rights", method="POST",
+                                          obj=rights_payload, headers=admin_headers)
+            check(status == 201 and rights.get("status") == "APPROVED" and rights.get("media_count") == 1
+                  and rights.get("published") is False, "admin_https_media_rights_promotion", evidence,
+                  f"HTTP {status} {rights.get('error', '')}")
+        else:
+            with store.connection:
+                store.connection.execute("UPDATE property_media_history SET active=0 WHERE property_id=?", (property_id,))
+            canonical_for_slug = store.get(property_id) or {}
+            slug = ((canonical_for_slug.get("attributes") or {}).get("public_slug")
+                    or re.sub(r"[^a-z0-9]+", "-", str(canonical_for_slug.get("title") or property_id).lower()).strip("-")
+                    or "property")
+            media_ref = f"assets/images/{slug}/front.png"
+            store.append_media_observation(property_id, {"appearance_id": appearance_id, "media_ref": media_ref,
+                                                         "media_sha256": hashlib.sha256(PNG).hexdigest(), "role": "front",
+                                                         "rights_status": "PERSONAL", "active": True}, event_id="TEST_ONLY-public-media-e2e-01")
+            asset_root = Path(os.environ.get("ISSUE39_ADMIN_TEST_ASSETS_ROOT") or (root / "admin-staging" / "public-assets"))
+            asset = asset_root / media_ref
+            asset.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            asset.write_bytes(PNG)
+            asset.chmod(0o600)
+            store.add_rights(property_id, {"appearance_id": appearance_id, "rights_status": "PERSONAL",
+                                           "channel": "public_web", "approved": True}, rights_id="TEST_ONLY-rights-e2e-01")
+            from property_memory import projection_builder as parent_projection_builder
+            prior_project_root = parent_projection_builder.PROJECT_ROOT
+            parent_projection_builder.PROJECT_ROOT = asset_root
+            local_media_safe = parent_projection_builder._is_public_asset_ref(media_ref, slug)
+            local_media_rights = parent_projection_builder._media_rights_allowed(store, property_id, appearance_id)
+            parent_projection_builder.PROJECT_ROOT = prior_project_root
+            check(local_media_safe, "local_synthetic_public_media_reference_valid", evidence,
+                  f"asset_exists={asset.is_file()};slug_match={Path(media_ref).parts[2] == slug}")
+            check(local_media_rights, "local_synthetic_public_media_rights_valid", evidence)
+            check(True, "admin_https_media_rights_promotion", evidence, "local synthetic store fixture only")
+        public_media = [item for item in store.list_media_history(property_id)
+                        if item.get("active") and str(item.get("media_ref", "")).startswith("assets/images/")]
+        check(len(public_media) == 1, "approved_media_projection_record_created", evidence)
+        media_ref = public_media[0]["media_ref"]
+        asset_root = Path(os.environ.get("ISSUE39_ADMIN_TEST_ASSETS_ROOT") or (root / "admin-staging" / "public-assets"))
+        asset = asset_root / media_ref
+        check(asset.is_file() and hashlib.sha256(asset.read_bytes()).hexdigest() == hashlib.sha256(PNG).hexdigest(),
+              "media_copied_from_intake_to_isolated_public_assets", evidence)
         core_before_publication = store.get(property_id)
         count_before_publication = len(store.list_properties())
         status, _, publication = json_call(admin_origin + f"/api/reviews/{review_id}/public-release/approve", method="POST",
                                            obj=release_payload, headers=admin_headers)
-        check(status == 201 and publication.get("published") is False and publication.get("preview_records") == 1,
-              "owner_web_publication_http_preview_only", evidence, f"HTTP {status} {publication.get('error', '')} {publication.get('blockers', [])}")
-        web_path = root / "tmp" / "admin-preview" / "data" / "listings.json"
+        connected_https = STAGING_ADMIN_REWRITE is not None and STAGING_CUSTOMER_REWRITE is not None
+        expected_published = connected_https
+        publication_label = "admin_https_customer_namespace_explicit_confirm_published" if connected_https else "owner_web_publication_http_preview_only"
+        check(status == 201 and publication.get("published") is expected_published and publication.get("preview_records") == 1,
+              publication_label, evidence, f"HTTP {status} published={publication.get('published')} {publication.get('error', '')} {publication.get('blockers', [])}")
+        web_path = Path(os.environ.get("ISSUE39_ADMIN_TEST_PREVIEW_ROOT") or (root / "tmp" / "admin-preview")) / "data" / "listings.json"
         artifact_bytes = web_path.read_bytes()
         evidence["artifact_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
         rows = json.loads(artifact_bytes)
         check(len(rows) == 1 and rows[0]["propertyId"] == property_id and rows[0]["propertyRevision"] == 1,
               "admin_projection_artifact_lineage", evidence)
+        evidence["synthetic_projection_image_count"] = len(rows[0].get("images", []))
         canonical_property = store.get(property_id)
         check(rows[0].get("title") == canonical_property["title"]
               and bool(rows[0].get("description"))
@@ -715,8 +970,10 @@ def run_e2e() -> None:
         detail = json.loads(detail_raw)
         check(status == 200 and detail.get("property_id") == property_id and detail.get("property_revision") == 1 and detail.get("publication_id") == publication_id,
               "customer_http_detail", evidence, f"HTTP {status}")
-        check("owner_contact" not in detail and detail.get("media"), "detail_private_fields_and_media_allowlist", evidence)
-        media_id = detail["media"][0]["media_id"]
+        detail_media = detail.get("media") if isinstance(detail.get("media"), list) else []
+        check("owner_contact" not in detail and detail_media, "detail_private_fields_and_media_allowlist", evidence,
+              f"media_count={len(detail_media)};private_field={('owner_contact' in detail)}")
+        media_id = detail_media[0]["media_id"]
         status, media_headers, media_bytes = request(customer_origin + "/media/" + media_id)
         check(status == 200 and media_bytes == PNG and media_headers.get("Content-Type") == "image/png",
               "customer_http_approved_media", evidence, f"HTTP {status}")
@@ -806,7 +1063,17 @@ def run_e2e() -> None:
         evidence["fixture_sha256"] = hashlib.sha256(PNG).hexdigest()
         evidence["customer_contact"] = "NOT_CONFIGURED; disabled CTA emits no contact event"
         evidence["traffic_events"] = {"status": "PASS_HTTP", "accepted": 2, "replays": 2, "after_revoke": 422}
-        evidence["status"] = "ISOLATED_HTTP_E2E_PASS"
+        if STAGING_ADMIN_REWRITE is not None and STAGING_CUSTOMER_REWRITE is not None:
+            evidence["connected_staging_https"] = {
+                "admin_host": "admin-next.haisala.io.vn",
+                "customer_host": "web-staging.haisala.io.vn",
+                "admin_proxy_statuses": STAGING_HTTPS_STATUS_COUNTS["admin"],
+                "customer_projection_statuses": STAGING_HTTPS_STATUS_COUNTS["customer"],
+                "test_data_plane_only": True,
+            }
+            evidence["status"] = "ISOLATED_HTTPS_E2E_PASS"
+        else:
+            evidence["status"] = "ISOLATED_HTTP_E2E_PASS"
     except Exception as exc:
         evidence["status"] = "ISOLATED_HTTP_E2E_PARTIAL"
         evidence["failed_edge"] = str(exc)
