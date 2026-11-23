@@ -13,7 +13,7 @@
 - Sự kiện Website (traffic, lượt xem chi tiết, CTA) quay về SALA BĐS, gắn canonical property/publication ID, chống ghi trùng, bảo vệ quyền riêng tư; không suy ra tracking/lead thật đã hoạt động.
 - Nguồn: [Owner one-system #7066301660](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7066301660), [Owner architecture lock #7066721682](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7066721682), [blueprint V1.0](../SALA_BDS_MASTER_SYSTEM_WEB_FIRST_BLUEPRINT_V1_OWNER_APPROVED.md).
 
-## D02 — FIRST WEB ưu tiên trước, UI đã duyệt ráp sau — LOCKED
+## D02 — FIRST WEB ưu tiên trước, UI đã duyệt ráp sau — LOCKED; UX được điều chỉnh bởi D15
 
 **Mục tiêu:** Xây lõi First Web + quản trị xuất bản + vận hành/bảo trì + hợp đồng API/data/UI đủ chắc để đạt `FIRST_WEB_CORE_READY_TO_SKIN`; sau đó ráp vỏ ChatSite đã Owner duyệt **không viết lại nghiệp vụ/kho dữ liệu** → kiểm thử qua các cổng → phát hành `https://haisala.io.vn` → Owner nghiệm thu. Chỉ sau đó mới ưu tiên phát triển/tích hợp các phân hệ AI Content, CRM, Social, Market/Growth (theo phép riêng); không xóa khả năng đã có.
 
@@ -48,7 +48,7 @@ Nguồn đầy đủ: [MASTER 5 PHASE #7058182954](https://github.com/Haisala/sa
 - Giao diện thật sẽ ráp sau lõi; trang maintenance có bằng chứng triển khai trước đó **không có nghĩa ứng dụng First Web đã LIVE**.
 - Nguồn: [#7064335056](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7064335056), [#7065120021](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7065120021), [#7066721682](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7066721682).
 
-## D06 — Bộ xử lý Content 4 giai đoạn, một API → năm Content — LOCKED, KHÔNG KÍCH HOẠT TRONG FIRST WEB
+## D06 — Bộ xử lý Content 4 giai đoạn, một API → năm Content — LOCKED; UX một-chạm theo D15, runtime vẫn cần GO riêng
 
 **Đây là phân hệ SALA BĐS Admin/Content Studio (Issue #38), không phải năm Phase First Web và không phải kiến trúc SALA Media.**
 
@@ -148,6 +148,30 @@ Nguồn đầy đủ: [MASTER 5 PHASE #7058182954](https://github.com/Haisala/sa
 - **Operational efficiency:** cùng checkpoint D13 `UNIFIED_FIRST_WEB_RELEASE_READINESS_AND_CONDITIONAL_CUTOVER`, một lệnh tổng hợp cho Codex; không mở job song song hoặc tạo quá nhiều gates bảo vệ dữ liệu nháp. Các kiểm tra quan trọng được gộp theo kết quả: owner login, canonical write/read, publish/rights/revoke, traffic/CTA, public artifact allowlist, cutover/rollback/HTTPS.
 - **Không tự tuyên bố GO production:** loại bỏ draft được Owner chấp thuận về **phạm vi dữ liệu**, còn thao tác thật/merge/deploy/cutover phải xác định runtime và release SHA/artifact và theo gate chính thức; không tác động dữ liệu/hệ thống khác, DB/credentials/secrets, không tự phát hành tin chưa duyệt.
 - **Báo cáo:** Codex cần nhận amendment ngay để không tiếp tục thiết kế migration legacy gây trì hoãn. Phân biệt `DRAFT_CLEANUP_AUTHORIZED_IN_SCOPE` với `DRAFT_CLEANUP_EXECUTED`; production/live chỉ khi receipt xác thực.
+
+## D15 — Owner chốt SALA BĐS “TẠO CONTENT MỘT CHẠM” + duyệt kênh riêng — LOCKED PRODUCT CONTRACT 23/11/2026
+
+**Căn cứ Owner mới nhất:** [Owner correction Issue #39 #7092986943](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7092986943), sau khi Owner thử Safari iPhone, đã lưu một Intake biệt thự EcoCity (5 media, `RECEIVED`) nhưng màn Gate A báo “Chưa có review”. Owner **đã chủ động dừng lệnh cũ** [#7092805062](https://github.com/Haisala/sala-bmt-listings/issues/39#issuecomment-7092805062) thêm nút “Xử lý nguồn”. Không suy ra tiến trình đã dừng nếu thiếu receipt runtime.
+
+**Thay đổi có hiệu lực:** D02/D06 tiếp tục quy định nền tảng kỹ thuật, an toàn và quyền phát hành, **nhưng không được hiểu thành UX buộc Owner tự bấm tuần tự “Lưu Intake → Xử lý nguồn → Gate A → chạy AI9 → Tạo Content”.** Đích giao diện chính là **(1) nhập nguyên liệu BĐS/ảnh/video/nguồn → (2) bấm “TẠO CONTENT”**; mọi xử lý nguồn/chống trùng/chuẩn hóa/Review nội bộ có thể phải diễn ra tự động trong một orchestration theo ranh giới quyền. Các phase kỹ thuật có thể phát triển theo giai đoạn, nhưng **không lộ thành nhiều nút nghiệp vụ bắt buộc**.
+
+**Một lần bấm “Tạo Content” phải:**
+1. Tái sử dụng Intake/Property Core/ReviewCenter, idempotency/duplicate/media, chuẩn hóa facts, provenance/quyền sử dụng, trạng thái unknown và kiểm tra phần còn thiếu. Tạo/liên kết Review mà không tự duyệt Gate A; không ghi dữ liệu chưa duyệt vào Property Core. Không chế tạo thông tin/pháp lý/quyền ảnh.
+2. Giữ các năng lực Audience/Research/Strategy/Content hữu ích ở trong Bộ xử lý Content; không chạy chín lần gọi AI. **Tối đa một outbound OpenAI generation request khi người dùng yêu cầu**, sinh **đúng 5 bản Content trong cùng một response** và một receipt usage/tokens/model/request ID/estimated USD. Không gọi provider preflight/extraction riêng, retry ẩn hoặc thế hệ Content thứ hai. Nếu dữ liệu không đủ an toàn, trả về thông báo và giữ nguyên đầu vào; không tự xem là thành công.
+3. Trả ngay **năm bản Content có thể xem, sửa, chọn, lưu, duyệt**, kèm tình trạng facts/media/rights. Không tự duyệt Gate A, Gate B hoặc tự công bố. Không yêu cầu Owner đi tìm kết quả ở Approval Queue.
+
+**Website và Social cùng đợt kết quả:**
+- Website dùng đúng **các trường đã có của public projection/customer schema** lấy từ canonical Property Core/revision; tách dữ liệu cấu trúc (tên, loại, giá, diện tích, vị trí, pháp lý khi đã xác nhận, trạng thái, ảnh/quyền, mô tả) khỏi văn bản Content sáng tạo. Trường unknown là unknown, không bịa. Chưa đạt Gate A/rights/required facts thì chặn publish và nêu lý do.
+- Chuẩn bị các bản hiển thị/định dạng theo kênh Website, Facebook, Zalo, TikTok, Instagram, YouTube, X, LinkedIn... với ID nội dung và quyền media gắn theo kênh khi đã có contract. **Không phải năm lần gọi AI cho mỗi social.** Không tự nhận hỗ trợ social auto-post/video nếu chưa có kết nối/format/permission được chứng minh.
+- **Duyệt riêng từng kênh và từng content revision**; duyệt Website không tự duyệt Social, ngược lại. Duyệt/sửa/lưu/publish không tự phát sinh request OpenAI.
+
+**Website yêu cầu hai lần xác nhận có chủ ý sau Content:** (i) Hải bấm **“Duyệt cho Website”** với Content/bản xem trước và trạng thái Gate B phù hợp; (ii) màn xác nhận cuối hiển thị chính xác sản phẩm, giá, ảnh, các trường công khai và revision; Hải bấm **“XÁC NHẬN ĐĂNG”** mới được thực hiện Web Publish theo Owner auth, Gate A/rights/revision/audit/revoke/idempotency. **Gate A khác Gate B khác Web approval**, không tự bỏ các cổng. Nếu phát hiện xung đột giữa luồng one-click và các gate bắt buộc, chỉ báo pending rõ cho Owner, không bypass.
+
+**Giữ lại tất cả đã chứng minh tốt:** một SALA BĐS, một Owner session/Property Core, Intake media manager+SHA dedup, chính sách quyền/private/revision, Customer public projection và Web Publish độc lập với AI Content, AI9 nội bộ dormant và Usage Ledger, UI/brand đã duyệt, snapshot/rollback; không sửa SALA Media hoặc repo khác. Nút “AI9 TEST_ONLY” không hiện trên Owner UI.
+
+**Phạm vi hiệu lực/quyền:** Đây là **quyết định sản phẩm và điều phối**, thay thế duy nhất việc chọn nút “Xử lý nguồn” là hành động người dùng bắt buộc và thứ tự UX Content bị đẩy mãi về sau. **Không phải GO vô điều kiện** để Codex tiếp tục lệnh đã dừng, tự sửa mã, bật Content/OpenAI, phát sinh chi phí, chạy dữ liệu thật, merge/deploy Staging/Production hoặc auto-post Social. Trạng thái trước thực thi: PR #44 DRAFT, HEAD đối chiếu `3980d09c55ed4a635810282e27c6a6552f1e0552`, Staging Intake media đã PASS, hồ sơ biệt thự Owner hiện mới có bằng chứng `RECEIVED`, one-touch **NOT_IMPLEMENTED / NOT_ACCEPTED**.
+
+**Một việc ưu tiên:** lập **phương án tích hợp tối thiểu vào mã đã có** cho one-click orchestration + năm bản + channel previews/approvals + Website confirm hai bước, đối chiếu đúng endpoints/schema/gates/usage; trình Owner GO thực thi riêng. Không tách thành nhiều nút kỹ thuật. Tình trạng chính thức và yêu cầu Owner xem [Issue #39](https://github.com/Haisala/sala-bmt-listings/issues/39).
 
 ## Lưu ý về authority
 
