@@ -102,7 +102,8 @@ def main() -> None:
         assert retry_upload["accepted"] == replay_upload["accepted"] == 1
 
         page = adm.page().decode("utf-8")
-        for required in ("intake-media-input", "intake-media-list", "intake-preview", "previewDialog.showModal",
+        for required in ("intake-media-input", "intake-add-media", "Thêm ảnh/tệp", "mediaInput.click()",
+                         "intake-media-list", "intake-preview", "previewDialog.showModal",
                          "URL.revokeObjectURL", "data.delete('media')", "data.append('media'", "Bỏ ảnh/tệp",
                          "window.crypto.subtle.digest", "duplicate_count"):
             assert required in page, required
