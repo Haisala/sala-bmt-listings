@@ -407,21 +407,8 @@ def run_e2e() -> None:
         store = PropertyStore(root / "admin-private" / "property-core.sqlite3")
         gate_b_fixture = ReviewCenter(store)
         approved_package = gate_b_fixture.view(review_id)
-        approved_package["selected_content"] = {
-            "content_batch_id": "content-batch-TEST_ONLY-http-e2e",
-            "content_variant_id": "content-variant-TEST_ONLY-http-e2e",
-            "content_revision": 1,
-            "facts_revision_id": f"facts-{property_id}-r1",
-            "property_id": property_id,
-            "property_revision": 1,
-            "title": "TEST_ONLY HTTP Home",
-            "body": "TEST_ONLY factual description",
-            "status": "OWNER_APPROVED",
-            "approved_by": "TEST_ONLY_OWNER",
-            "gate_b": {"status": "PASS", "fixture": "TEST_ONLY"},
-        }
-        gate_b_fixture._persist(approved_package)
-        evidence["gate_b"] = "TEST_ONLY approved package fixture; Content UI/API was not invoked"
+        check(not approved_package.get("selected_content"), "web_publish_without_gate_b_content", evidence)
+        evidence["gate_b"] = "No Content variant fixture; Content UI/API remains dormant"
 
         status, _, content_denied = json_call(admin_origin + f"/api/reviews/{review_id}/content/create", method="POST", obj={}, headers=admin_headers)
         check(status == 404 and content_denied.get("error") == "CONTENT_PHASE_DISABLED",
@@ -459,9 +446,11 @@ def run_e2e() -> None:
         rows = json.loads(artifact_bytes)
         check(len(rows) == 1 and rows[0]["propertyId"] == property_id and rows[0]["propertyRevision"] == 1,
               "admin_projection_artifact_lineage", evidence)
-        check(rows[0].get("title") == "TEST_ONLY HTTP Home"
-              and rows[0].get("description") == "TEST_ONLY factual description",
-              "projection_uses_approved_property_facts", evidence)
+        canonical_property = store.get(property_id)
+        check(rows[0].get("title") == canonical_property["title"]
+              and bool(rows[0].get("description"))
+              and not any(key in rows[0] for key in ("contentBatchId", "contentVariantId", "contentRevision")),
+              "projection_uses_approved_property_facts_without_gate_b", evidence)
         check(store.get(property_id) == core_before_publication and len(store.list_properties()) == count_before_publication,
               "property_core_unchanged_by_web_publication", evidence)
 
@@ -474,8 +463,8 @@ def run_e2e() -> None:
         listing = feed["items"][0]
         check(listing["property_id"] == property_id and listing["property_revision"] == 1 and listing["projection_id"] == rows[0]["projectionId"],
               "feed_identity_and_revision_linkage", evidence)
-        check(listing.get("title") == "TEST_ONLY HTTP Home"
-              and listing.get("description") == "TEST_ONLY factual description", "customer_reads_approved_property_facts", evidence)
+        check(listing.get("title") == canonical_property["title"] and listing.get("description") == rows[0]["description"],
+              "customer_reads_approved_property_facts_without_gate_b", evidence)
         publication_id = listing["publication_id"]
         check(publication_id == rows[0]["publicationId"], "feed_publication_id_linkage", evidence)
         status, _, detail_raw = request(customer_origin + "/api/listings/" + listing["listing_id"])

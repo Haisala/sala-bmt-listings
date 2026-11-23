@@ -466,10 +466,9 @@ def _public_release_snapshot(center: ReviewCenter, review_id: str, *, cleanup_st
         property_revision = 0
     else:
         property_revision = int(prop.get("property_revision") or 0)
-        if (content.get("status") != "OWNER_APPROVED" or content.get("property_id") != property_id
-                or int(content.get("property_revision") or 0) != property_revision
-                or content.get("facts_revision_id") != f"facts-{property_id}-r{property_revision}"):
-            blockers.append("APPROVED_CONTENT_REQUIRED")
+        # Gate B content is optional for First Web. When present, the projection
+        # builder validates its approval and revision linkage; without it, the
+        # public DTO is built from approved canonical Property Core facts.
         if property_revision < 1:
             blockers.append("PROPERTY_REVISION_REQUIRED")
         required = ("title", "property_type", "address", "price")

@@ -90,9 +90,7 @@ def main() -> None:
         review_id = approved["review_id"]
         property_id = approved["mutation_result"]["property_id"]
         package_record = center.packages[review_id]
-        package_record["selected_content_variant_id"] = "content-variant-TEST_ONLY"
-        package_record["selected_content"] = {"content_batch_id": "content-batch-TEST_ONLY", "content_variant_id": "content-variant-TEST_ONLY", "content_revision": 1, "facts_revision_id": f"facts-{property_id}-r1", "property_id": property_id, "property_revision": 1, "title": "TEST_ONLY approved title", "body": "TEST_ONLY approved description", "status": "OWNER_APPROVED"}
-        center._persist(package_record)
+        assert not package_record.get("selected_content")
         adm.configure_review_center(center)
         canonical_path, website_path = adm._public_preview_paths()
         origin = f"http://127.0.0.1:{adm.PORT}"
@@ -219,8 +217,6 @@ def main() -> None:
         assert response["status"] == 409 and response["value"]["error"] == "STALE_PUBLIC_RELEASE_REVISION"
         current_payload = {**approval_payload, "expected_property_revision": 2,
                            "idempotency_key": "owner-release-revision-two"}
-        package_record["selected_content"] = {**package_record["selected_content"], "content_revision": 2, "property_revision": 2, "facts_revision_id": f"facts-{property_id}-r2", "title": "TEST_ONLY approved title r2", "body": "TEST_ONLY approved description r2"}
-        center._persist(package_record)
         handler, response = make_handler(adm, f"/api/reviews/{review_id}/public-release/approve", method="POST",
                                          payload=current_payload, origin=origin)
         handler.do_POST()
@@ -265,8 +261,7 @@ def main() -> None:
                                          decision="CREATE_NEW_PROPERTY", idempotency_key="gate-a-test-only-two")
         second_id = second_approved["mutation_result"]["property_id"]
         second_record = center.packages[second_approved["review_id"]]
-        second_record["selected_content"] = {"content_batch_id": "content-batch-TEST_ONLY-2", "content_variant_id": "content-variant-TEST_ONLY-2", "content_revision": 1, "facts_revision_id": f"facts-{second_id}-r1", "property_id": second_id, "property_revision": 1, "title": "TEST_ONLY second title", "body": "TEST_ONLY second body", "status": "OWNER_APPROVED"}
-        center._persist(second_record)
+        assert not second_record.get("selected_content")
         web_before = website_path.read_bytes()
         core_projection_before = canonical_path.read_bytes()
         real_writer = adm.write_staging_web_artifact
