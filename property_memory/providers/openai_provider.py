@@ -58,7 +58,9 @@ CONTENT_RESPONSE_SCHEMA = {
                            "t": {"type": "string"}, "b": {"type": "string"},
                            "f": _FACT_USAGE_ARRAY, "u": _STRING_ARRAY, "w": _STRING_ARRAY},
             "required": ["i", "t", "b", "f", "u", "w"]}},
-        "f": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+        # Content generation consumes already-normalized intake facts. It must
+        # not create a second, unrevisioned fact/evidence set.
+        "f": {"type": "array", "maxItems": 0, "items": {"type": "object", "additionalProperties": False,
             "properties": {"k": {"type": "string"}, "r": {"type": "string"},
                            "n": {"type": "string"}, "e": {"type": "string"}},
             "required": ["k", "r", "n", "e"]}},
@@ -131,7 +133,9 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
     if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
         raise ValueError("CONTENT_INPUT_REQUIRED")
-    instructions = "Use supplied facts only; never invent. Return 5 distinct Vietnamese drafts. Variant f lists exact fact keys, not values."
+    instructions = ("Use supplied facts only; never invent. Return 5 distinct Vietnamese drafts. "
+                    "For each variant, f lists only exact supplied fact keys, never values. "
+                    "Do not extract, normalize, or emit facts/evidence; top-level f must be empty because facts are already normalized and revision-bound.")
     def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.

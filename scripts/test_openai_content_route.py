@@ -1,6 +1,6 @@
 """TEST_ONLY one-touch Intake -> Review -> five private Content contract."""
 from __future__ import annotations
-import os, sys, tempfile
+import json, os, sys, tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -115,12 +115,16 @@ def main():
         bad_result=call(handler,failed_intake["id"],"TEST_ONLY-invalid-facts-used-001")
       receipt=bad_result["value"].get("receipt",{})
       assert bad_result["status"]==422 and bad_result["value"]["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
+      assert bad_result["value"]["validation_diagnostic"]=={
+        "stage":"variant_facts_used","rule":"unique_submitted_fact_keys_only","variant_index":1,
+        "unknown_key_count":1,"duplicate_key_count":0,"value_type_invalid":False}
+      assert "TEST_ONLY" not in json.dumps(bad_result["value"]["validation_diagnostic"])
       assert receipt.get("request_id")=="req_TEST_ONLY" and receipt.get("model")=="gpt-6-luna"
       assert all(receipt.get("usage",{}).get(k)==v for k,v in {"input_tokens":100,"output_tokens":300,"total_tokens":400}.items())
       assert receipt.get("estimated_cost_usd")=="0.0001" and receipt.get("ledger_status")=="RECORDED"
       assert bad_provider.calls==1 and store.list_properties()==[] and bad_result["value"]["published"] is False
     # Exercise the actual authenticated POST route over loopback with TEST_ONLY storage.
-    import json, threading, urllib.error, urllib.request
+    import threading, urllib.error, urllib.request
     from http.server import ThreadingHTTPServer
     http_root=root/"http"; http_root.mkdir(mode=0o700)
     http_private=http_root/"private"; http_private.mkdir(mode=0o700)
@@ -175,12 +179,13 @@ def main():
       server.shutdown();server.server_close();thread.join(timeout=3);admin.SESSIONS.pop(sid,None);admin.SESSION_OWNERS.pop(sid,None);http_store.close()
 
     from property_memory.content_studio import build_generative_content_batch
+    from property_memory.providers.openai_provider import build_content_request
     from property_memory.usage_ledger import compute_usd, official_pricing_catalog
     base=dict(generation_id="TEST_ONLY-malformed",facts={"title":"TEST_ONLY"},provenance={"intake_id":intake["id"]},
       rights_status="PERSONAL",media=[],model="gpt-6-luna",source_text="TEST_ONLY text")
     valid=Provider();valid_usage=Usage();out=build_generative_content_batch(**base,provider=valid,usage_sink=valid_usage)
     assert out["status"]=="PASS" and len(out["variants"])==5 and valid.calls==1
-    invalid_shapes=(["unknown_key"], ["TEST_ONLY"], None, "title")
+    invalid_shapes=(["unknown_key"], ["TEST_ONLY"], None, "title", [1], ["title","title"])
     for shape in invalid_shapes:
       bad=Provider(facts_used=shape);sink=Usage();out=build_generative_content_batch(**base,provider=bad,usage_sink=sink)
       assert out["status"]=="BLOCKED" and out["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
@@ -189,12 +194,44 @@ def main():
     invented=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY","normalized_value":"invented","evidence":"absent"}])
     invented_out=build_generative_content_batch(**base,provider=invented,usage_sink=Usage())
     assert invented_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
+    assert invented_out["validation_diagnostic"]=={"stage":"normalized_facts","rule":"content_must_not_create_facts","item_index":0,"field":"title"}
+    assert "TEST_ONLY" not in json.dumps(invented_out["validation_diagnostic"])
+    # All normalized-fact variants are rejected with a field-safe diagnostic;
+    # no source value/evidence text is copied into the diagnostic or receipt.
+    invalid_fact_items=(
+      {"field":"unknown_field","raw_value":"x","normalized_value":"x","evidence":"TEST_ONLY"},
+      {"field":"title","raw_value":"x","normalized_value":"different unit","evidence":"TEST_ONLY"},
+      {"field":"title","raw_value":"x","normalized_value":"x","evidence":"absent punctuation"},
+      {"field":"title","raw_value":72,"normalized_value":"72 m²","evidence":"TEST_ONLY"},
+      {"field":"title","raw_value":"x","normalized_value":"x","evidence":"không dấu tiếng Việt"},
+      {"field":"title","raw_value":"x","normalized_value":"x"},
+      {"field":"title","raw_value":"x","normalized_value":"x","evidence":"TEST_ONLY"},
+      [{"field":"title","raw_value":"x","normalized_value":"x","evidence":"TEST_ONLY"},
+       {"field":"title","raw_value":"x","normalized_value":"x","evidence":"TEST_ONLY"}],
+      "malformed-item",
+    )
+    for item in invalid_fact_items:
+      bad=Provider(normalized_facts=[item]);sink=Usage()
+      rejected=build_generative_content_batch(**base,provider=bad,usage_sink=sink)
+      assert rejected["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
+      assert rejected["validation_diagnostic"]["rule"]=="content_must_not_create_facts"
+      assert rejected["receipt"]["request_id"]=="req_TEST_ONLY" and len(sink.rows)==1
+      assert "TEST_ONLY" not in json.dumps(rejected["validation_diagnostic"])
+    # Normalized Vietnamese text, units, numeric prices and optional fields
+    # pass through as caller-owned revision-bound facts without reinterpretation.
+    passthrough={"title":"Căn hộ ở Đắk Lắk","area":"72 m²","optional":None}
+    request=build_content_request({"facts":passthrough,"source_text":"Giá thuê 6 triệu/tháng; căn hộ 72 m²"},"gpt-6-luna")
+    sent=json.loads(request["input"])["facts"]
+    assert sent=={"area":passthrough["area"]}  # request budget permits this field with source text
+    assert json.loads(request["input"])["source_text"]=="Giá thuê 6 triệu/tháng; căn hộ 72 m²"
+    priced=json.loads(build_content_request({"facts":{"title":"Căn hộ Đắk Lắk","price_vnd_per_month":6000000}},"gpt-6-luna")["input"])["facts"]
+    assert priced.get("price_vnd_per_month")==6000000 and isinstance(priced["price_vnd_per_month"],int)
     mismatch=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY","normalized_value":"different","evidence":"TEST_ONLY"}])
     mismatch_out=build_generative_content_batch(**base,provider=mismatch,usage_sink=Usage())
-    assert mismatch_out["reason_codes"]==["CONTENT_SOURCE_CONFLICT"]
+    assert mismatch_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
     normalized_only=Provider(facts_used=["area"],normalized_facts=[{"field":"area","raw_value":"50 m2","normalized_value":"50 m2","evidence":"TEST_ONLY"}])
     normalized_only_out=build_generative_content_batch(**base,provider=normalized_only,usage_sink=Usage())
-    assert normalized_only_out["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
+    assert normalized_only_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
     omitted=Provider(facts_used=["description"],input_fact_keys=["title"])
     omitted_out=build_generative_content_batch(**{**base,"facts":{"title":"TEST_ONLY","description":"not sent"}},provider=omitted,usage_sink=Usage())
     assert omitted_out["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
@@ -207,6 +244,36 @@ def main():
     for n in (4,6):
       bad=Provider(count=n);out=build_generative_content_batch(**base,provider=bad,usage_sink=Usage())
       assert out["status"]=="BLOCKED" and out["reason_codes"]==["CONTENT_SCHEMA_INVALID"] and out["receipt"]["request_id"]=="req_TEST_ONLY" and bad.calls==1
+    malformed=Provider();malformed.generate=lambda payload:{"variants":[],"normalized_facts":None,"missing_fields":[],"conflicts":[],"usage":DEFAULT_USAGE,"provider_request_id":"req_TEST_ONLY"}
+    malformed_result=build_generative_content_batch(**base,provider=malformed,usage_sink=Usage())
+    assert malformed_result["reason_codes"]==["CONTENT_SCHEMA_INVALID"]
+    assert malformed_result["validation_diagnostic"]=={
+      "stage":"response_shape","rule":"five_variants_and_fact_metadata_lists",
+      "invalid_fields":["normalized_facts","variants"]}
+    class DuplicateContentProvider(Provider):
+      def generate(self,payload):
+        value=super().generate(payload)
+        for variant in value["variants"][1:]:variant["body"]=value["variants"][0]["body"]
+        return value
+    duplicate=DuplicateContentProvider();duplicate_result=build_generative_content_batch(**base,provider=duplicate,usage_sink=Usage())
+    assert duplicate_result["reason_codes"]==["CONTENT_NOT_DISTINCT"]
+    assert duplicate.calls==1
+    class MissingFactsProvider(Provider):
+      def generate(self,payload):
+        value=super().generate(payload)
+        for variant in value["variants"]:variant.pop("facts_used",None)
+        return value
+    missing_facts=MissingFactsProvider();missing_result=build_generative_content_batch(**base,provider=missing_facts,usage_sink=Usage())
+    assert missing_result["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"] and missing_facts.calls==1
+    assert missing_result["validation_diagnostic"]["value_type_invalid"] is True
+    class ConflictingProvider(Provider):
+      def generate(self,payload):
+        value=super().generate(payload);value["conflicts"]=["title"];return value
+    conflict_provider=ConflictingProvider()
+    conflict_result=build_generative_content_batch(**base,provider=conflict_provider,usage_sink=Usage())
+    assert conflict_result["reason_codes"]==["CONTENT_SOURCE_CONFLICT"] and conflict_provider.calls==1
+    assert conflict_result["validation_diagnostic"]=={
+      "stage":"source_conflicts","rule":"provider_reported_conflict","allowed_field_count":1,"fields":["title"]}
     no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights,usage_sink=Usage())
     assert out["status"]=="BLOCKED" and no_rights.calls==0
     store.close()

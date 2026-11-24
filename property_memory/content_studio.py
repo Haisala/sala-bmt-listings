@@ -56,7 +56,7 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         except Exception:
             return None
 
-    def failed_response(reason_codes: list[str], *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    def failed_response(reason_codes: list[str], *, validation_diagnostic: dict[str, Any] | None = None) -> dict[str, Any]:
         recorded = record_attempt(outcome="FAILED", usage=response_usage, request_id=response_request_id)
         required_usage = ("input_tokens", "output_tokens", "total_tokens")
         usage_complete = isinstance(response_usage, dict) and all(
@@ -84,7 +84,8 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
             "outcome": "FAILED_VALIDATION",
         }
         return {"status": "BLOCKED", "reason_codes": reason_codes, "published": False,
-                "mutated_property_store": False, "variants": [], "receipt": receipt, **(extra or {})}
+                "mutated_property_store": False, "variants": [], "receipt": receipt,
+                "validation_diagnostic": validation_diagnostic}
 
     try:
         response = provider.generate(payload)
@@ -100,7 +101,14 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
     if (not isinstance(variants, list) or len(variants) != CONTENT_BATCH_OUTPUT_COUNT
             or not isinstance(normalized_facts, list) or not isinstance(missing_fields, list)
             or not isinstance(conflicts, list)):
-        return failed_response(["CONTENT_SCHEMA_INVALID"])
+        observed = {"variants": variants, "normalized_facts": normalized_facts,
+                    "missing_fields": missing_fields, "conflicts": conflicts}
+        return failed_response(["CONTENT_SCHEMA_INVALID"], validation_diagnostic={
+            "stage": "response_shape", "rule": "five_variants_and_fact_metadata_lists",
+            "invalid_fields": sorted(key for key, value in observed.items()
+                                      if not isinstance(value, list)
+                                      or (key == "variants" and len(value) != CONTENT_BATCH_OUTPUT_COUNT)),
+        })
     source_fact_keys = {k for k, v in facts.items() if v not in (None, "")}
     submitted_fact_keys = response.get("input_fact_keys")
     if submitted_fact_keys is None:
@@ -111,23 +119,29 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
           or not all(isinstance(key, str) for key in submitted_fact_keys)
           or len(submitted_fact_keys) != len(set(submitted_fact_keys))
           or not set(submitted_fact_keys).issubset(source_fact_keys)):
-        return failed_response(["CONTENT_FACTS_SCHEMA_INVALID"])
+        keys_valid = isinstance(submitted_fact_keys, list) and all(isinstance(key, str) for key in submitted_fact_keys)
+        return failed_response(["CONTENT_FACTS_SCHEMA_INVALID"], validation_diagnostic={
+            "stage": "submitted_fact_keys", "rule": "unique_subset_of_source_facts",
+            "value_type_invalid": not keys_valid,
+            "duplicate_key_count": len(submitted_fact_keys) - len(set(submitted_fact_keys)) if keys_valid else 0,
+            "unknown_key_count": sum(key not in source_fact_keys for key in submitted_fact_keys) if keys_valid else 0,
+        })
     else:
         allowed = set(submitted_fact_keys)
-    normalized_keys: set[str] = set()
-    for item in normalized_facts:
-        if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("field", "raw_value", "normalized_value", "evidence")):
-            return failed_response(["CONTENT_FACTS_SCHEMA_INVALID"])
-        field = item["field"]
-        evidence = item["evidence"].strip()
-        if field not in CONTENT_NORMALIZED_FACT_FIELDS or field in normalized_keys or not evidence or evidence not in source_text:
-            return failed_response(["CONTENT_FACTS_EVIDENCE_INVALID"])
-        normalized_keys.add(field)
-        if field in facts and facts[field] not in (None, "") and str(facts[field]).strip() != item["normalized_value"].strip():
-            conflicts.append(field)
+    if normalized_facts:
+        item = normalized_facts[0]
+        field = item.get("field") if isinstance(item, dict) else None
+        return failed_response(["CONTENT_FACTS_EVIDENCE_INVALID"], validation_diagnostic={
+            "stage": "normalized_facts", "rule": "content_must_not_create_facts",
+            "item_index": 0, "field": field if isinstance(field, str) and field in CONTENT_NORMALIZED_FACT_FIELDS else None,
+        })
     if conflicts:
-        return failed_response(["CONTENT_SOURCE_CONFLICT"], extra={
-            "normalized_facts": normalized_facts, "conflicts": sorted(set(str(x) for x in conflicts))})
+        safe_conflicts = sorted({value for value in conflicts
+                                 if isinstance(value, str) and value in CONTENT_NORMALIZED_FACT_FIELDS})
+        return failed_response(["CONTENT_SOURCE_CONFLICT"], validation_diagnostic={
+            "stage": "source_conflicts", "rule": "provider_reported_conflict",
+            "allowed_field_count": len(safe_conflicts), "fields": safe_conflicts,
+        })
     bodies = []
     for item in variants:
         if not isinstance(item, dict) or not isinstance(item.get("body"), str) or not item["body"].strip():
@@ -135,9 +149,20 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         facts_used = item.get("facts_used")
         if (not isinstance(facts_used, list) or not all(isinstance(value, str) for value in facts_used)
                 or len(facts_used) != len(set(facts_used)) or not set(facts_used).issubset(allowed)):
-            return failed_response(["CONTENT_FACTS_UNGROUNDED"])
+            unknown = ([value for value in facts_used if value not in allowed]
+                       if isinstance(facts_used, list) and all(isinstance(value, str) for value in facts_used) else [])
+            return failed_response(["CONTENT_FACTS_UNGROUNDED"], validation_diagnostic={
+                "stage": "variant_facts_used", "rule": "unique_submitted_fact_keys_only",
+                "variant_index": item.get("variant_index") if type(item.get("variant_index")) is int else None,
+                "unknown_key_count": len(unknown),
+                "duplicate_key_count": len(facts_used) - len(set(facts_used)) if isinstance(facts_used, list) and all(isinstance(value, str) for value in facts_used) else 0,
+                "value_type_invalid": not isinstance(facts_used, list) or not all(isinstance(value, str) for value in facts_used),
+            })
         if not all(isinstance(item.get(k), list) for k in ("citations_used", "unknowns", "warnings")):
-            return failed_response(["CONTENT_METADATA_INVALID"])
+            return failed_response(["CONTENT_METADATA_INVALID"], validation_diagnostic={
+                "stage": "variant_metadata", "rule": "citations_unknowns_warnings_must_be_lists",
+                "variant_index": item.get("variant_index") if type(item.get("variant_index")) is int else None,
+            })
         bodies.append(item["body"])
     indices = [item.get("variant_index") for item in variants]
     if any(type(index) is not int for index in indices) or sorted(indices) != list(range(1, CONTENT_BATCH_OUTPUT_COUNT + 1)):

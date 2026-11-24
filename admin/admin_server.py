@@ -1757,7 +1757,8 @@ class Handler(BaseHTTPRequestHandler):
         if result.get("status") != "PASS" or len(result.get("variants", [])) != 5:
             response = {"error": "CONTENT_GENERATION_BLOCKED", "reason_codes": result.get("reason_codes", [result.get("status", "BLOCKED")]),
                         "intake_id": intake_id, "review_id": live["review_id"], "published": False,
-                        "provider_calls": 1, "receipt": result.get("receipt")}
+                        "provider_calls": 1, "receipt": result.get("receipt"),
+                        "validation_diagnostic": result.get("validation_diagnostic")}
             request_entry.update({"status": "BLOCKED", "response": response, "finished_at": now_iso()})
             center._persist(live)
             self.send_json(response, 422)

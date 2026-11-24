@@ -41,6 +41,8 @@ def main():
     assert request["max_output_tokens"]==900 and _content_cost_upper_bound(size,900)<0.01
     fact_enum=schema["properties"]["v"]["items"]["properties"]["f"]["items"]["enum"]
     assert set(fact_enum)==set(sent) and "owner_contact" not in fact_enum
+    assert schema["properties"]["f"]["maxItems"]==0
+    assert "top-level f must be empty" in request["instructions"]
     try: build_content_request({"facts":{},"source_text":""},"gpt-6-luna")
     except ValueError as e: assert str(e)=="CONTENT_INPUT_REQUIRED"
     else: raise AssertionError("empty prompt accepted")
@@ -54,6 +56,7 @@ def main():
     assert len(result["variants"])==5 and result["provider_request_id"]=="req_TEST_ONLY"
     assert result["input_fact_keys"]==["title"]
     assert result["usage"]["total_tokens"]==50 and transport.calls==1
+    assert result["normalized_facts"]==[]
     for malformed in (value|{"v":compact_variants()[:4]}, value|{"v":compact_variants()+[compact_variants()[0]]}):
         t=Transport(malformed)
         try: OpenAIPropertyProvider(api_key="TEST_ONLY_KEY",transport=t).generate({"facts":{"title":"TEST_ONLY"}})
