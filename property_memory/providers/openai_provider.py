@@ -20,6 +20,11 @@ CONTENT_NORMALIZED_FACT_FIELDS = (
     "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
     "price_type", "legal_status", "house_type", "description",
 )
+CONTENT_FACT_PRIORITY = (
+    "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
+    "price", "price_type", "legal_status", "house_type", "bedrooms", "bathrooms",
+    "road_access", "features", "description",
+)
 
 EXTRACTION_RESPONSE_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -43,6 +48,7 @@ EXTRACTION_RESPONSE_SCHEMA = {
 }
 
 _STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
+_FACT_USAGE_ARRAY = {"type": "array", "items": {"type": "string"}}
 CONTENT_RESPONSE_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
@@ -50,7 +56,7 @@ CONTENT_RESPONSE_SCHEMA = {
             "type": "object", "additionalProperties": False,
             "properties": {"i": {"type": "integer", "minimum": 1, "maximum": CONTENT_VARIANT_COUNT},
                            "t": {"type": "string"}, "b": {"type": "string"},
-                           "f": _STRING_ARRAY, "u": _STRING_ARRAY, "w": _STRING_ARRAY},
+                           "f": _FACT_USAGE_ARRAY, "u": _STRING_ARRAY, "w": _STRING_ARRAY},
             "required": ["i", "t", "b", "f", "u", "w"]}},
         "f": {"type": "array", "items": {"type": "object", "additionalProperties": False,
             "properties": {"k": {"type": "string"}, "r": {"type": "string"},
@@ -65,11 +71,6 @@ MAX_CONTENT_REQUEST_BYTES = 8000
 MAX_CONTENT_INPUT_TOKENS = 1200
 MAX_CONTENT_OUTPUT_TOKENS = 900
 MAX_CONTENT_COST_USD = 0.01
-CONTENT_FACT_PRIORITY = (
-    "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
-    "price", "price_type", "legal_status", "house_type", "bedrooms", "bathrooms",
-    "road_access", "features", "description",
-)
 
 class ProviderError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False, diagnostics: dict[str, Any] | None = None):
@@ -130,24 +131,26 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
     if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
         raise ValueError("CONTENT_INPUT_REQUIRED")
-    instructions = "Use source quotes only; normalize facts. Return 5 distinct Vietnamese drafts. No invented facts, legal claims or rights."
-    schema_bytes = len(json.dumps(CONTENT_RESPONSE_SCHEMA, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-
+    instructions = "Use supplied facts only; never invent. Return 5 distinct Vietnamese drafts. Variant f lists exact fact keys, not values."
     def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
         allowed = {"facts": selected_facts}
         if isinstance(source_text, str) and source_text.strip():
             allowed["source_text"] = source_text
+        schema = json.loads(json.dumps(CONTENT_RESPONSE_SCHEMA))
+        identifiers = list(selected_facts) or list(CONTENT_FACT_PRIORITY)
+        schema["properties"]["v"]["items"]["properties"]["f"]["items"]["enum"] = identifiers
         request = {"model": model, "instructions": instructions,
                    "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
                    "reasoning": {"effort": "low"},
                    "max_output_tokens": max_output_tokens,
                    "text": {"format": {"type": "json_schema", "name": "content_five", "strict": True,
-                                        "schema": CONTENT_RESPONSE_SCHEMA}}}
+                                        "schema": schema}}}
         request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         input_token_upper_bound = (len(instructions.encode("utf-8")) + len(request["input"].encode("utf-8"))
-                                   + schema_bytes + len("content_five"))
+                                   + len(json.dumps(schema, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                                   + len("content_five"))
         return request if request_bytes <= MAX_CONTENT_REQUEST_BYTES and input_token_upper_bound <= MAX_CONTENT_INPUT_TOKENS else None
 
     selected: dict[str, Any] = {}
@@ -319,4 +322,5 @@ class OpenAIPropertyProvider:
         value["usage"] = response.get("usage") if isinstance(response.get("usage"), dict) else None
         value["provider_request_id"] = response.get("id") if isinstance(response.get("id"), str) else None
         value["metadata"] = {"provider": self.provider_name, "model": self.model, "prompt_version": CONTENT_PROMPT_VERSION}
+        value["input_fact_keys"] = list(json.loads(request_payload["input"]).get("facts", {}))
         return value

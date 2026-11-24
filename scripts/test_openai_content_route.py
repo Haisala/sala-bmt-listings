@@ -11,18 +11,27 @@ from property_memory.intake_review import process_intake
 from property_memory.mutation_service import ReliabilityBoundary
 from property_memory.review_center import ReviewCenter
 
+DEFAULT_FACTS_USED=object()
+DEFAULT_USAGE=object()
+DEFAULT_INPUT_KEYS=object()
+
 class Noop:
     def audit(self,*a,**k): pass
     def enqueue(self,*a,**k): return {"status":"queued"}
 class Provider:
     provider_name="TEST_ONLY_MOCK";model="gpt-6-luna"
-    def __init__(self,count=5):self.calls=0;self.count=count
+    def __init__(self,count=5,facts_used=DEFAULT_FACTS_USED,normalized_facts=None,usage=DEFAULT_USAGE,input_fact_keys=DEFAULT_INPUT_KEYS):
+        self.calls=0;self.count=count;self.facts_used=facts_used;self.normalized_facts=normalized_facts or [];self.usage=usage;self.input_fact_keys=input_fact_keys
     def generate(self,payload):
         self.calls+=1
         assert payload["output_count"]==5 and payload["media_analysis"]=="NOT_SENT"
-        return {"variants":[{"variant_index":i,"title":f"Fixture {i}","body":f"Distinct synthetic draft {i}","facts_used":["title"],"citations_used":[],"unknowns":[],"warnings":[]} for i in range(1,self.count+1)],
-                "normalized_facts":[],"missing_fields":["area"],"conflicts":[],
-                "usage":{"input_tokens":100,"output_tokens":300,"total_tokens":400},"provider_request_id":"req_TEST_ONLY"}
+        used=["title"] if self.facts_used is DEFAULT_FACTS_USED else self.facts_used
+        usage={"input_tokens":100,"output_tokens":300,"total_tokens":400} if self.usage is DEFAULT_USAGE else self.usage
+        result={"variants":[{"variant_index":i,"title":f"Fixture {i}","body":f"Distinct synthetic draft {i}","facts_used":used,"citations_used":[],"unknowns":[],"warnings":[]} for i in range(1,self.count+1)],
+                "normalized_facts":self.normalized_facts,"missing_fields":["area"],"conflicts":[],
+                "usage":usage,"provider_request_id":"req_TEST_ONLY"}
+        if self.input_fact_keys is not DEFAULT_INPUT_KEYS:result["input_fact_keys"]=self.input_fact_keys
+        return result
 class Usage:
     def __init__(self):self.rows=[]
     def record(self,**kw):
@@ -67,6 +76,9 @@ def main():
       assert intake["status"]=="CONTENT_CREATED" and intake["contentReviewId"]==body["review_id"]
       assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
       assert body["generation"]["content_variant_ids"]==[v["content_variant_id"] for v in body["variants"]]
+      assert all(v["intake_id"]==intake["id"] and v["review_id"]==body["review_id"]
+                 and v["review_revision"]==body["review_revision"]
+                 and v["facts_revision_id"]==body["facts_revision_id"] for v in body["variants"])
       assert body["generation"]["estimated_cost_usd"]=="0.0001"
       assert len(usage.rows[0]["usage"])==3 and usage.rows[0]["review_id"]==pkg["review_id"]
       denied_rights=call(handler,missing["id"],"TEST_ONLY-no-rights-key-001")
@@ -94,6 +106,19 @@ def main():
       records.append(intake_b)
       wrong_evidence=call(handler,intake_b["id"],"TEST_ONLY-cross-intake-001",{"evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"}]}})
       assert wrong_evidence["status"]==409 and wrong_evidence["value"]["error"]=="EVIDENCE_INTAKE_MISMATCH" and wrong_evidence["value"]["intake_id"]==intake_b["id"]
+      failed_intake={"id":"TEST_ONLY-intake-bad-facts-used","source":"TEST_ONLY","sourceGroup":"SYNTHETIC",
+        "note":"TEST_ONLY source text","preliminaryFacts":{"title":"TEST_ONLY","property_type":"APARTMENT",
+        "transaction_type":"SALE","price_vnd":1000000,"address":"TEST_ONLY Lane","area":"50 m2"},
+        "ownerEvidence":{"source_id":"TEST_ONLY-source-c","claim":"TEST_ONLY only","rights_status":"COMPANY"},"media":[]}
+      records.append(failed_intake);bad_provider=Provider(facts_used=["TEST_ONLY"])
+      with patch.object(admin,"_AI_PROVIDER",bad_provider):
+        bad_result=call(handler,failed_intake["id"],"TEST_ONLY-invalid-facts-used-001")
+      receipt=bad_result["value"].get("receipt",{})
+      assert bad_result["status"]==422 and bad_result["value"]["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
+      assert receipt.get("request_id")=="req_TEST_ONLY" and receipt.get("model")=="gpt-6-luna"
+      assert all(receipt.get("usage",{}).get(k)==v for k,v in {"input_tokens":100,"output_tokens":300,"total_tokens":400}.items())
+      assert receipt.get("estimated_cost_usd")=="0.0001" and receipt.get("ledger_status")=="RECORDED"
+      assert bad_provider.calls==1 and store.list_properties()==[] and bad_result["value"]["published"] is False
     # Exercise the actual authenticated POST route over loopback with TEST_ONLY storage.
     import json, threading, urllib.error, urllib.request
     from http.server import ThreadingHTTPServer
@@ -150,12 +175,39 @@ def main():
       server.shutdown();server.server_close();thread.join(timeout=3);admin.SESSIONS.pop(sid,None);admin.SESSION_OWNERS.pop(sid,None);http_store.close()
 
     from property_memory.content_studio import build_generative_content_batch
+    from property_memory.usage_ledger import compute_usd, official_pricing_catalog
     base=dict(generation_id="TEST_ONLY-malformed",facts={"title":"TEST_ONLY"},provenance={"intake_id":intake["id"]},
-      rights_status="PERSONAL",media=[],model="gpt-6-luna",source_text="TEST_ONLY text",usage_sink=usage)
+      rights_status="PERSONAL",media=[],model="gpt-6-luna",source_text="TEST_ONLY text")
+    valid=Provider();valid_usage=Usage();out=build_generative_content_batch(**base,provider=valid,usage_sink=valid_usage)
+    assert out["status"]=="PASS" and len(out["variants"])==5 and valid.calls==1
+    invalid_shapes=(["unknown_key"], ["TEST_ONLY"], None, "title")
+    for shape in invalid_shapes:
+      bad=Provider(facts_used=shape);sink=Usage();out=build_generative_content_batch(**base,provider=bad,usage_sink=sink)
+      assert out["status"]=="BLOCKED" and out["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
+      assert out["receipt"]["request_id"]=="req_TEST_ONLY" and out["receipt"]["usage_status"]=="PROVIDER_RETURNED_USAGE"
+      assert len(sink.rows)==1 and sink.rows[0]["outcome"]=="FAILED"
+    invented=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY","normalized_value":"invented","evidence":"absent"}])
+    invented_out=build_generative_content_batch(**base,provider=invented,usage_sink=Usage())
+    assert invented_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
+    mismatch=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY","normalized_value":"different","evidence":"TEST_ONLY"}])
+    mismatch_out=build_generative_content_batch(**base,provider=mismatch,usage_sink=Usage())
+    assert mismatch_out["reason_codes"]==["CONTENT_SOURCE_CONFLICT"]
+    normalized_only=Provider(facts_used=["area"],normalized_facts=[{"field":"area","raw_value":"50 m2","normalized_value":"50 m2","evidence":"TEST_ONLY"}])
+    normalized_only_out=build_generative_content_batch(**base,provider=normalized_only,usage_sink=Usage())
+    assert normalized_only_out["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
+    omitted=Provider(facts_used=["description"],input_fact_keys=["title"])
+    omitted_out=build_generative_content_batch(**{**base,"facts":{"title":"TEST_ONLY","description":"not sent"}},provider=omitted,usage_sink=Usage())
+    assert omitted_out["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"]
+    missing_usage=Provider(facts_used=["unknown_key"],usage=None)
+    unknown_receipt=build_generative_content_batch(**base,provider=missing_usage,usage_sink=None)["receipt"]
+    assert unknown_receipt["usage_status"]=="USAGE_UNKNOWN" and unknown_receipt["cost_status"]=="USAGE_UNKNOWN"
+    assert unknown_receipt["estimated_cost_usd"] is None and unknown_receipt["request_id"]=="req_TEST_ONLY"
+    assert compute_usd({},official_pricing_catalog()["gpt-6-luna"])["status"]=="USAGE_INCOMPLETE"
+    assert compute_usd({"input_tokens":True,"output_tokens":2,"total_tokens":3},official_pricing_catalog()["gpt-6-luna"])["status"]=="USAGE_INCOMPLETE"
     for n in (4,6):
-      bad=Provider(count=n);out=build_generative_content_batch(**base,provider=bad)
-      assert out["status"]=="BLOCKED" and bad.calls==1
-    no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights)
+      bad=Provider(count=n);out=build_generative_content_batch(**base,provider=bad,usage_sink=Usage())
+      assert out["status"]=="BLOCKED" and out["reason_codes"]==["CONTENT_SCHEMA_INVALID"] and out["receipt"]["request_id"]=="req_TEST_ONLY" and bad.calls==1
+    no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights,usage_sink=Usage())
     assert out["status"]=="BLOCKED" and no_rights.calls==0
     store.close()
   print("PASS: authenticated loopback HTTP missing-fields 409/provider=0 → same-intake draft save → 201/5 private variants → replay 200; A/B evidence mismatch 409; 0 Property Core writes/publish")

@@ -36,9 +36,11 @@ def main():
     assert schema["properties"]["v"]["maxItems"]==5
     size=len(json.dumps(request,ensure_ascii=False,separators=(",",":" )).encode())
     upper=(len(request["instructions"].encode())+len(request["input"].encode())+
-           len(json.dumps(schema,separators=(",",":" )).encode())+len("content_five"))
+           len(json.dumps(schema,ensure_ascii=False,separators=(",",":" )).encode())+len("content_five"))
     assert upper<=MAX_CONTENT_INPUT_TOKENS and size<MAX_CONTENT_REQUEST_BYTES
     assert request["max_output_tokens"]==900 and _content_cost_upper_bound(size,900)<0.01
+    fact_enum=schema["properties"]["v"]["items"]["properties"]["f"]["items"]["enum"]
+    assert set(fact_enum)==set(sent) and "owner_contact" not in fact_enum
     try: build_content_request({"facts":{},"source_text":""},"gpt-6-luna")
     except ValueError as e: assert str(e)=="CONTENT_INPUT_REQUIRED"
     else: raise AssertionError("empty prompt accepted")
@@ -50,6 +52,7 @@ def main():
     transport=Transport(value)
     result=OpenAIPropertyProvider(api_key="TEST_ONLY_KEY",transport=transport).generate({"facts":{"title":"TEST_ONLY"}})
     assert len(result["variants"])==5 and result["provider_request_id"]=="req_TEST_ONLY"
+    assert result["input_fact_keys"]==["title"]
     assert result["usage"]["total_tokens"]==50 and transport.calls==1
     for malformed in (value|{"v":compact_variants()[:4]}, value|{"v":compact_variants()+[compact_variants()[0]]}):
         t=Transport(malformed)

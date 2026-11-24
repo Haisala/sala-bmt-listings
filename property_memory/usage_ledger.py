@@ -18,7 +18,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None]:
     details = u.get("input_tokens_details") if isinstance(u.get("input_tokens_details"), dict) else {}
     out_details = u.get("output_tokens_details") if isinstance(u.get("output_tokens_details"), dict) else {}
     def integer(value: Any) -> int | None:
-        return int(value) if isinstance(value, (int, float)) and value >= 0 else None
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
     return {
         "input_tokens": integer(u.get("input_tokens")),
         "output_tokens": integer(u.get("output_tokens")),
@@ -37,6 +37,8 @@ def compute_usd(usage: dict[str, Any], pricing: dict[str, Any] | None) -> dict[s
         return {"usd_cost": None, "status": "PRICE_OR_USAGE_SEMANTICS_UNVERIFIED", "components": {}, "tokens": tokens, "reason": "cache_write_category_not_proven_native_or_billable_for_this_request"}
     if not isinstance(pricing, dict) or pricing.get("status") != "VERIFIED":
         return {"usd_cost": None, "status": "PRICE_NOT_VERIFIED", "components": {}, "tokens": tokens}
+    if tokens["input_tokens"] is None or tokens["output_tokens"] is None:
+        return {"usd_cost": None, "status": "USAGE_INCOMPLETE", "components": {}, "tokens": tokens}
     # Reasoning tokens are a subset of output tokens; never charge them separately.
     rates = {k: Decimal(str(pricing.get(k) if pricing.get(k) is not None else 0)) for k in ("input_per_token_usd", "output_per_token_usd", "cached_read_per_token_usd", "cache_write_per_token_usd")}
     components = {"input": Decimal(tokens["input_tokens"] or 0) * rates["input_per_token_usd"], "output": Decimal(tokens["output_tokens"] or 0) * rates["output_per_token_usd"], "cached_read": Decimal(tokens["cached_read_tokens"] or 0) * rates["cached_read_per_token_usd"], "cache_write": Decimal(tokens["cache_write_tokens"] or 0) * rates["cache_write_per_token_usd"]}
