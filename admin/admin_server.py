@@ -50,9 +50,11 @@ from property_memory.content_studio import build_copy_studio_preview, build_gene
 try:
     from .one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP, OWNER_NAV_HTML
     from .intake_workflow_ui import INTAKE_WORKFLOW_CSS, INTAKE_WORKFLOW_SCRIPT
+    from .media_management_ui import MEDIA_MANAGEMENT_CSS, MEDIA_MANAGEMENT_SCRIPT
 except ImportError:  # Running admin_server.py as the service entrypoint.
     from one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP, OWNER_NAV_HTML
     from intake_workflow_ui import INTAKE_WORKFLOW_CSS, INTAKE_WORKFLOW_SCRIPT
+    from media_management_ui import MEDIA_MANAGEMENT_CSS, MEDIA_MANAGEMENT_SCRIPT
 from property_memory.evidence import validate_evidence_payload
 from property_memory.keychain import CredentialError, resolve_openai_key
 from property_memory.runtime_config import diagnostic_payload, health_payload, load_runtime_config
@@ -947,6 +949,128 @@ def safe_name(name: str) -> str:
     return base[:120]
 
 
+def _image_signature_ok(filename: str, content: bytes) -> bool:
+    """Accept only raster image bytes that the private preview handler can serve."""
+    suffix = Path(filename).suffix.lower()
+    signatures = {
+        ".jpg": content.startswith(b"\xff\xd8\xff"),
+        ".jpeg": content.startswith(b"\xff\xd8\xff"),
+        ".png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        ".webp": len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP",
+        ".avif": len(content) >= 12 and content[4:8] == b"ftyp" and b"avif" in content[8:32],
+    }
+    return bool(signatures.get(suffix, False))
+
+
+def update_saved_intake_media(intake_id: str, action: str, expected_revision: int,
+                              media_id: str, files: list[tuple[str, bytes]], owner_id: str) -> dict:
+    """Edit a pending intake's selected media while retaining immutable source files."""
+    if action not in {"add", "replace", "remove"} or not owner_id:
+        raise ValueError("MEDIA_EDIT_REQUEST_INVALID")
+    if action == "remove" and files or action == "replace" and len(files) != 1 or action == "add" and not files:
+        raise ValueError("MEDIA_EDIT_FILE_COUNT_INVALID")
+    if any(not _image_signature_ok(name, data) or not data or len(data) > MAX_FILE for name, data in files):
+        raise ValueError("MEDIA_IMAGE_TYPE_OR_SIZE_INVALID")
+    with PROPERTY_OPERATION_LOCK, PRIVATE_FILE_LOCK:
+        items = load_index()
+        index = next((i for i, row in enumerate(items) if row.get("id") == intake_id), None)
+        if index is None:
+            raise KeyError("INTAKE_NOT_FOUND")
+        record = items[index]
+        if int(record.get("mediaRevision", 1)) != expected_revision:
+            raise ValueError("STALE_INTAKE_MEDIA_REVISION")
+        center = REVIEW_CENTER
+        package = next((p for p in center.packages.values()
+                        if p.get("candidate", {}).get("intake_id") == intake_id), None) if center else None
+        if package and (package.get("state") in {"APPROVED", "APPROVING"} or package.get("mutation_result")):
+            raise ValueError("MEDIA_EDIT_GATE_A_PROTECTED")
+        selected = list(record.get("media") or [])
+        target = next((item for item in selected if item.get("mediaId") == media_id), None) if media_id else None
+        if action in {"replace", "remove"} and target is None:
+            raise KeyError("INTAKE_MEDIA_NOT_FOUND")
+        prior_hashes = {str(item.get("sha256")) for item in selected}
+        all_history = list(record.get("mediaHistory") or [])
+        history_hashes = {str(event.get("sha256")) for event in all_history if event.get("sha256")}
+        if any(hashlib.sha256(data).hexdigest() in prior_hashes | history_hashes for _, data in files):
+            raise ValueError("DUPLICATE_MEDIA")
+        folder = (INBOX_ROOT / intake_id).resolve()
+        folder.relative_to(INBOX_ROOT.resolve())
+        if not folder.is_dir():
+            raise KeyError("INTAKE_STORAGE_NOT_FOUND")
+        now = now_iso()
+        archived = []
+        if target:
+            archived.append({**target, "archivedAt": now})
+            selected.remove(target)
+        additions = []
+        for filename, content in files:
+            digest = hashlib.sha256(content).hexdigest()
+            media_key = media_identity(digest)
+            ext = Path(filename).suffix.lower()
+            stored_name = media_key + ext
+            destination = folder / stored_name
+            if destination.exists():
+                raise ValueError("MEDIA_STORAGE_COLLISION")
+            with destination.open("xb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            destination.chmod(0o600)
+            additions.append({"mediaId": media_key, "filename": filename, "storedFilename": stored_name,
+                              "path": str((Path("inbox") / intake_id / stored_name)),
+                              "bytes": len(content), "sha256": digest, "addedAt": now,
+                              "addedBy": owner_id, "rights_status": "UNCONFIRMED"})
+        if action == "remove":
+            pass
+        else:
+            selected.extend(additions)
+        if len(selected) > 30:
+            for added in additions:
+                (folder / added["storedFilename"]).unlink(missing_ok=True)
+            raise ValueError("MEDIA_COUNT_LIMIT")
+        revision = expected_revision + 1
+        record["media"] = selected
+        record["mediaRevision"] = revision
+        record["inputRevision"] = int(record.get("inputRevision", 1)) + 1
+        record["updatedAt"] = now
+        record.setdefault("mediaHistory", []).extend(archived)
+        record.setdefault("mediaSelectionHistory", []).append({
+            "revision": revision, "action": action, "owner_id": owner_id, "at": now,
+            "removed_media_ids": [target["mediaId"]] if target else [],
+            "added_media_ids": [item["mediaId"] for item in additions],
+            "preserved_source_files": True,
+        })
+        items[index] = record
+        metadata = folder / "metadata.json"
+        temp = folder / f".metadata.{uuid.uuid4().hex}.tmp"
+        temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp.chmod(0o600)
+        temp.replace(metadata)
+        save_index(items)
+        if package:
+            package["candidate"]["media"] = deepcopy(selected)
+            package["candidate"]["media_revision"] = revision
+            package["media_revision"] = revision
+            package["review_revision"] = int(package.get("review_revision", 0)) + 1
+            package["state"] = "EDITED"
+            package["updated_at"] = now
+            package["processing_stage"] = "MEDIA_REVISION_UPDATED"
+            package.pop("selected_content", None)
+            package.pop("selected_content_variant_id", None)
+            for batch in package.get("content_batches", []):
+                batch["media_revision_stale"] = True
+                for variant in batch.get("variants", []):
+                    variant["media_revision_stale"] = True
+            center._persist(package)
+        append_audit("intake_media_edit", intake_id, "succeeded", None, 1,
+                     operation_id=f"media-{intake_id}-r{revision}",
+                     idempotency_key=f"{intake_id}:media:{revision}")
+        return {"intake_id": intake_id, "media_revision": revision, "input_revision": record["inputRevision"],
+                "media": selected, "archived_count": len(record["mediaHistory"]),
+                "review_revision": package.get("review_revision") if package else None,
+                "rights_default": "UNCONFIRMED", "published": False}
+
+
 def parse_multipart_intake(raw: bytes, content_type: str) -> tuple[dict[str, str], list[tuple[str, bytes]]]:
     """Decode browser multipart fields as UTF-8 without replacement characters."""
     msg = BytesParser(policy=policy.default).parsebytes(
@@ -1415,7 +1539,7 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
             owner_evidence = {"source_id": f"intake:{intake_id}", "claim": note.strip()[:1200],
                               "rights_status": fields.get("evidence_rights", "").strip().upper()}
             owner_evidence_revision = 1 if owner_evidence["rights_status"] in {"PERSONAL", "COMPANY", "APPROVED"} else 0
-            record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "inputRevision": 1, "sourceNoteRevision": 1, "status": "RECEIVED", "note": note, "ownerEvidence": owner_evidence, "ownerEvidenceRevision": owner_evidence_revision, "preliminaryFacts": {}, "ownerFacts": {}, "ownerFactsRevision": 0, "media": media, "missingFields": [], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
+            record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "inputRevision": 1, "mediaRevision": 1, "sourceNoteRevision": 1, "status": "RECEIVED", "note": note, "ownerEvidence": owner_evidence, "ownerEvidenceRevision": owner_evidence_revision, "preliminaryFacts": {}, "ownerFacts": {}, "ownerFactsRevision": 0, "media": media, "mediaHistory": [], "mediaSelectionHistory": [], "missingFields": [], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
             record = project_intake_prefill(record)
             (staging / "metadata.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             (staging / "metadata.json").chmod(0o600)
@@ -1462,8 +1586,8 @@ const blockerLabels={GATE_A_APPROVAL_REQUIRED:'Cần Gate A APPROVED đúng revi
 window.loadReview=async function(id){await priorLoadReview(id);const detail=document.querySelector('#review-detail');if(!detail)return;const reviewResponse=await fetch('/api/reviews/'+encodeURIComponent(id),{credentials:'same-origin'});const review=await reviewResponse.json();if(!reviewResponse.ok)return;const panel=document.createElement('section');panel.id='public-release';panel.className='item';panel.innerHTML='<h4>Duyệt công bố riêng trên Website</h4><p class="muted">Quyết định riêng với Gate A. Staging sẽ công khai trên Customer staging; private test chỉ tạo preview. Production chỉ đổi bằng Owner-triggered deploy.</p><p data-release-status>Đang kiểm tra...</p><p data-release-lineage class="muted"></p><p data-release-facts class="muted"></p><p data-release-media class="muted"></p><div class="item"><h5>Duyệt quyền ảnh cho Website</h5><p data-media-rights-summary class="muted">Ảnh chỉ được sao chép sang public-assets staging sau khi Owner xác nhận quyền.</p><select data-media-appearance aria-label="Nguồn ảnh"></select><select data-media-rights-status aria-label="Loại quyền"><option value="PERSONAL">Ảnh cá nhân</option><option value="COMPANY">Ảnh công ty</option></select><button type="button" data-media-rights-approve class="secondary" style="min-height:44px">Duyệt quyền ảnh Web</button><p data-media-rights-message class="muted" role="status"></p></div><details data-confirm-preview><summary>Xem dữ liệu sẽ public</summary><div data-confirm-preview-body></div></details><ul data-release-blockers class="err"></ul><div class="row"><button type="button" data-release-approve style="min-height:44px;flex:1 1 180px">XÁC NHẬN ĐĂNG</button><button type="button" data-release-revoke class="secondary" style="min-height:44px;flex:1 1 180px">Thu hồi công bố</button></div><p data-release-message class="muted" role="status"></p>';
 detail.append(panel);const statusNode=panel.querySelector('[data-release-status]'),lineage=panel.querySelector('[data-release-lineage]'),factsNode=panel.querySelector('[data-release-facts]'),mediaNode=panel.querySelector('[data-release-media]'),blockerList=panel.querySelector('[data-release-blockers]'),previewBody=panel.querySelector('[data-confirm-preview-body]'),message=panel.querySelector('[data-release-message]'),approve=panel.querySelector('[data-release-approve]'),revoke=panel.querySelector('[data-release-revoke]'),appearanceSelect=panel.querySelector('[data-media-appearance]'),rightsSelect=panel.querySelector('[data-media-rights-status]'),rightsButton=panel.querySelector('[data-media-rights-approve]'),rightsSummary=panel.querySelector('[data-media-rights-summary]'),rightsMessage=panel.querySelector('[data-media-rights-message]');let current=null;
 const refreshRights=async()=>{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/media-rights',{credentials:'same-origin'});const data=await response.json();if(!response.ok){rightsSummary.textContent='Không tải được trạng thái quyền ảnh.';rightsButton.disabled=true;return}const rows=data.appearances||[];appearanceSelect.replaceChildren(...rows.map(x=>{const option=document.createElement('option');option.value=x.appearance_id;option.textContent=x.appearance_id+' · '+x.media_count+' file · '+(x.approved?'đã duyệt '+x.rights_status:'chưa duyệt');return option}));rightsSummary.textContent=rows.some(x=>x.media_count>0)?'Chọn nguồn ảnh và xác nhận PERSONAL hoặc COMPANY. Chỉ staging được cấp quyền.':'Chưa có ảnh thuộc intake này.';rightsButton.disabled=!rows.some(x=>x.media_count>0)};
-const renderConfirmationPreview=data=>{previewBody.replaceChildren();const dto=data.confirmation_preview;if(!dto){const p=document.createElement('p');p.className='err';p.textContent='Preview chưa sẵn sàng; xem blockers trước khi xác nhận.';previewBody.append(p);return}const fields=[['Tiêu đề',dto.title],['Loại BĐS',dto.propertyType],['Giá',dto.priceLabel||dto.price],['Diện tích',dto.area],['Địa chỉ/vị trí',dto.addressText],['Pháp lý',dto.legal||'UNKNOWN'],['Trạng thái',dto.status],['Mô tả sẽ public',dto.description],['Property / revision',dto.propertyId+' · r'+dto.propertyRevision],['Content',dto.contentVariantId?dto.contentVariantId+' · r'+dto.contentRevision:'Facts-only']];for(const [label,value] of fields){const row=document.createElement('p'),b=document.createElement('b'),span=document.createElement('span');b.textContent=label+': ';span.textContent=value==null||value===''?'UNKNOWN':String(value);row.append(b,span);previewBody.append(row)}const media=data.confirmation_media||[],gallery=document.createElement('div');gallery.className='intake-media-grid';for(const item of media){const img=document.createElement('img');img.src='/api/reviews/'+encodeURIComponent(id)+'/public-release/media/'+encodeURIComponent(item.media_id);img.alt='Ảnh đã được duyệt quyền public';img.loading='lazy';img.className='intake-media-thumb';gallery.append(img)}if(media.length)previewBody.append(gallery);else{const p=document.createElement('p');p.className='muted';p.textContent='Không có ảnh trong projection này.';previewBody.append(p)}const note=document.createElement('p');note.className='muted';note.textContent='Preview được dựng từ canonical Property Core và quyền ảnh hiện tại; publication ID chỉ được tạo khi Owner xác nhận.';previewBody.append(note)};
-const confirmPublication=data=>new Promise(resolve=>{const dto=data.confirmation_preview,dialog=document.createElement('dialog');dialog.className='intake-preview';const heading=document.createElement('h2');heading.textContent=data.publication_mode==='STAGING_PUBLIC'?'Xác nhận đăng lên Customer Staging':'Xác nhận tạo preview private';dialog.append(heading);const lineage=document.createElement('p');lineage.textContent='Property '+dto.propertyId+' · revision '+dto.propertyRevision+(dto.contentVariantId?' · Content '+dto.contentVariantId+' r'+dto.contentRevision:' · facts-only');dialog.append(lineage);const grid=document.createElement('div');for(const [label,value] of [['Tiêu đề',dto.title],['Loại',dto.propertyType],['Giá',dto.priceLabel||dto.price],['Diện tích',dto.area],['Địa chỉ/vị trí',dto.addressText],['Pháp lý',dto.legal||'UNKNOWN'],['Mô tả',dto.description]]){const row=document.createElement('p'),b=document.createElement('b');b.textContent=label+': ';row.append(b,document.createTextNode(value==null||value===''?'UNKNOWN':String(value)));grid.append(row)}dialog.append(grid);const gallery=document.createElement('div');gallery.className='intake-media-grid';for(const item of(data.confirmation_media||[])){const figure=document.createElement('figure'),img=document.createElement('img'),caption=document.createElement('figcaption');img.src='/api/reviews/'+encodeURIComponent(id)+'/public-release/media/'+encodeURIComponent(item.media_id);img.alt='Ảnh đã được duyệt quyền public';img.className='intake-media-thumb';caption.textContent='Quyền sử dụng: '+item.rights_status;figure.append(img,caption);gallery.append(figure)}if(!gallery.childElementCount){const p=document.createElement('p');p.textContent='Không có ảnh trong projection.';gallery.append(p)}dialog.append(gallery);const rights=document.createElement('p');rights.textContent='Ảnh đủ quyền: '+(data.media_summary?.eligible||0)+' · bị chặn: '+(data.media_summary?.blocked||0)+' · Customer publish revision này sau khi xác nhận.';dialog.append(rights);const cancel=document.createElement('button');cancel.type='button';cancel.className='secondary';cancel.textContent='Hủy';const confirm=document.createElement('button');confirm.type='button';confirm.textContent=data.publication_mode==='STAGING_PUBLIC'?'XÁC NHẬN ĐĂNG':'XÁC NHẬN PREVIEW';const actions=document.createElement('div');actions.className='row';actions.append(cancel,confirm);dialog.append(actions);let accepted=false;dialog.addEventListener('close',()=>{dialog.remove();resolve(accepted)});cancel.onclick=()=>dialog.close();confirm.onclick=()=>{accepted=true;dialog.close()};document.body.append(dialog);dialog.showModal()});
+const renderConfirmationPreview=data=>{previewBody.replaceChildren();const dto=data.confirmation_preview;if(!dto){const p=document.createElement('p');p.className='err';p.textContent='Preview chưa sẵn sàng; xem blockers trước khi xác nhận.';previewBody.append(p);return}const fields=[['Tiêu đề',dto.title],['Loại BĐS',dto.propertyType],['Giá',dto.priceLabel||dto.price],['Diện tích',dto.area],['Địa chỉ/vị trí',dto.addressText],['Pháp lý',dto.legal||'UNKNOWN'],['Trạng thái',dto.status],['Mô tả sẽ public',dto.description],['Property / revision',dto.propertyId+' · r'+dto.propertyRevision],['Content',dto.contentVariantId?dto.contentVariantId+' · r'+dto.contentRevision:'Facts-only']];for(const [label,value] of fields){const row=document.createElement('p'),b=document.createElement('b'),span=document.createElement('span');b.textContent=label+': ';span.textContent=value==null||value===''?'UNKNOWN':String(value);row.append(b,span);previewBody.append(row)}const media=data.confirmation_media||[],gallery=document.createElement('div');gallery.className='intake-media-grid';for(const item of media){const img=document.createElement('img');img.src='/api/reviews/'+encodeURIComponent(id)+'/public-release/media/'+encodeURIComponent(item.media_id);img.alt='Ảnh đã được duyệt quyền public';img.loading='eager';img.decoding='async';img.className='intake-media-thumb';img.dataset.mediaId=item.media_id;gallery.append(img)}if(media.length)previewBody.append(gallery);else{const p=document.createElement('p');p.className='muted';p.textContent='Không có ảnh trong projection này.';previewBody.append(p)}const note=document.createElement('p');note.className='muted';note.dataset.previewMediaStatus='true';note.textContent=media.length?'Đang tải và kiểm tra '+media.length+' ảnh trước khi Owner xác nhận.':'Preview được dựng từ canonical Property Core; publication ID chỉ được tạo khi Owner xác nhận.';previewBody.append(note)};
+const confirmPublication=async data=>{const dto=data.confirmation_preview,media=data.confirmation_media||[],sources=media.map(item=>'/api/reviews/'+encodeURIComponent(id)+'/public-release/media/'+encodeURIComponent(item.media_id));const decoded=await Promise.all(sources.map(async(src,index)=>{const img=new Image();img.decoding='async';img.src=src;try{await img.decode();return img.naturalWidth>0&&img.naturalHeight>0}catch(_){return false}}));const failed=decoded.filter(ok=>!ok).length;if(failed){const note=previewBody.querySelector('[data-preview-media-status]');if(note){note.className='err';note.textContent=failed+' / '+media.length+' ảnh không giải mã được; xác nhận bị khóa. Tải lại preview hoặc xử lý ảnh lỗi.'}return false}return new Promise(resolve=>{const dialog=document.createElement('dialog');dialog.className='intake-preview';const heading=document.createElement('h2');heading.textContent=data.publication_mode==='STAGING_PUBLIC'?'Xác nhận đăng lên Customer Staging':'Xác nhận tạo preview private';dialog.append(heading);const lineage=document.createElement('p');lineage.textContent='Property '+dto.propertyId+' · revision '+dto.propertyRevision+(dto.contentVariantId?' · Content '+dto.contentVariantId+' r'+dto.contentRevision:' · facts-only');dialog.append(lineage);const grid=document.createElement('div');for(const [label,value] of [['Tiêu đề',dto.title],['Loại',dto.propertyType],['Giá',dto.priceLabel||dto.price],['Diện tích',dto.area],['Địa chỉ/vị trí',dto.addressText],['Pháp lý',dto.legal||'UNKNOWN'],['Mô tả',dto.description]]){const row=document.createElement('p'),b=document.createElement('b');b.textContent=label+': ';row.append(b,document.createTextNode(value==null||value===''?'UNKNOWN':String(value)));grid.append(row)}dialog.append(grid);const gallery=document.createElement('div');gallery.className='intake-media-grid';for(const item of media){const figure=document.createElement('figure'),img=document.createElement('img'),caption=document.createElement('figcaption');img.src='/api/reviews/'+encodeURIComponent(id)+'/public-release/media/'+encodeURIComponent(item.media_id);img.alt='Ảnh đã được duyệt quyền public';img.loading='eager';img.decoding='async';img.className='intake-media-thumb';caption.textContent='Quyền sử dụng: '+item.rights_status;figure.append(img,caption);gallery.append(figure)}if(!gallery.childElementCount){const p=document.createElement('p');p.textContent='Không có ảnh trong projection.';gallery.append(p)}dialog.append(gallery);const rights=document.createElement('p');rights.textContent='Ảnh đủ quyền: '+(data.media_summary?.eligible||0)+' · bị chặn: '+(data.media_summary?.blocked||0)+' · Customer publish revision này sau khi xác nhận.';dialog.append(rights);const cancel=document.createElement('button');cancel.type='button';cancel.className='secondary';cancel.textContent='Hủy';const confirm=document.createElement('button');confirm.type='button';confirm.textContent=data.publication_mode==='STAGING_PUBLIC'?'XÁC NHẬN ĐĂNG':'XÁC NHẬN PREVIEW';const actions=document.createElement('div');actions.className='row';actions.append(cancel,confirm);dialog.append(actions);let accepted=false;dialog.addEventListener('close',()=>{dialog.remove();resolve(accepted)},{once:true});cancel.onclick=()=>dialog.close();confirm.onclick=()=>{if(Array.from(gallery.querySelectorAll('img')).some(img=>img.naturalWidth===0)){rights.className='err';rights.textContent='Ảnh preview lỗi tải; không thể xác nhận.';confirm.disabled=true;return}accepted=true;dialog.close()};document.body.append(dialog);dialog.showModal()})};
 const refresh=async()=>{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release',{credentials:'same-origin'});const data=await response.json();current=data;await refreshRights();if(!response.ok){statusNode.textContent='Không tải được trạng thái công bố: '+(blockerLabels[data.error]||data.error||response.status);return}statusNode.textContent=data.state==='PUBLIC_ALLOWED'&&data.publication_mode==='STAGING_PUBLIC'?'Đang công khai trên Website staging':(stateLabels[data.state]||data.state);approve.textContent=data.publication_mode==='STAGING_PUBLIC'?'XEM VÀ XÁC NHẬN ĐĂNG':'XEM VÀ XÁC NHẬN PREVIEW';revoke.textContent=data.publication_mode==='STAGING_PUBLIC'?'Gỡ khỏi Website staging':'Thu hồi preview';lineage.textContent='Gate A '+(data.gate_a_state||'UNKNOWN')+' · review '+id+' r'+data.review_revision+' · property '+(data.property_id||'—')+' · Core r'+data.property_revision;renderConfirmationPreview(data);const f=data.canonical_facts||{};factsNode.textContent='Facts Core: '+[f.title,f.property_type,f.address,f.area,f.price,f.price_type,f.public_status,f.legal_status].map(x=>x==null?'—':String(x)).join(' · ');const m=data.media_summary||{};mediaNode.textContent='Media active: '+(m.active||0)+' · đủ quyền và asset public: '+(m.eligible||0)+' · bị chặn: '+(m.blocked||0);blockerList.replaceChildren(...(data.blockers||[]).map(code=>{const li=document.createElement('li');li.textContent=blockerLabels[code]||code;return li}));approve.disabled=!data.can_approve;revoke.disabled=!data.can_revoke};
 const act=async action=>{if(!current)return;let reason='';if(action==='revoke'){reason=window.prompt('Lý do thu hồi quyền công bố?')||'';if(!reason.trim())return;if(!window.confirm('Xác nhận gỡ khỏi Website staging/preview?'))return}else{const fresh=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release',{credentials:'same-origin',cache:'no-store'}),snapshot=await fresh.json();current=snapshot;if(!fresh.ok||!snapshot.can_approve||!snapshot.confirmation_preview){const labels=(snapshot.blockers||[]).map(code=>blockerLabels[code]||code);message.className='err';message.textContent=labels.join(' · ')||blockerLabels[snapshot.error]||snapshot.error||'PUBLIC_CONFIRMATION_PREVIEW_BLOCKED';await refresh();return}if(!await confirmPublication(snapshot))return}approve.disabled=true;revoke.disabled=true;message.className='muted';message.textContent='Đang xử lý...';const nonce=window.crypto?.randomUUID?window.crypto.randomUUID():Date.now()+'-'+Math.random().toString(16).slice(2),selected=current.selected_content||{};try{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/public-release/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({property_id:current.property_id,expected_review_revision:current.review_revision,expected_property_revision:current.property_revision,expected_content_variant_id:selected.content_variant_id||null,expected_content_revision:selected.content_revision??null,idempotency_key:'admin-ui:'+action+':'+id+':'+nonce,reason})});const result=await response.json();if(!response.ok){const labels=(result.blockers||[]).map(code=>blockerLabels[code]||code);throw new Error(labels.join(' · ')||blockerLabels[result.error]||result.error||'HTTP '+response.status)}message.className='ok';message.textContent=action==='approve'?(result.published?'Đã công khai trên Customer Staging. Production chưa thay đổi.':'Preview private đã cập nhật, chưa public.'):(current.publication_mode==='STAGING_PUBLIC'?'Đã gỡ tin khỏi Customer Staging.':'Đã thu hồi preview.');await refresh()}catch(error){message.className='err';message.textContent=error.message;await refresh()}};
 rightsButton.onclick=async()=>{if(!current||!appearanceSelect.value)return;const status=rightsSelect.value;if(!window.confirm('Owner xác nhận quyền '+(status==='PERSONAL'?'cá nhân':'công ty')+' cho toàn bộ ảnh trong nguồn này trên Website staging?'))return;rightsButton.disabled=true;rightsMessage.className='muted';rightsMessage.textContent='Đang kiểm tra file và ghi nhận quyền...';try{const response=await fetch('/api/reviews/'+encodeURIComponent(id)+'/media-rights',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({property_id:current.property_id,expected_property_revision:current.property_revision,appearance_id:appearanceSelect.value,rights_status:status})});const data=await response.json();if(!response.ok)throw Error(data.error||'HTTP '+response.status);rightsMessage.className='ok';rightsMessage.textContent='Đã xác nhận '+data.media_count+' ảnh; bài vẫn chưa publish.';await refresh()}catch(error){rightsMessage.className='err';rightsMessage.textContent=error.message;await refresh()}};approve.onclick=()=>act('approve');revoke.onclick=()=>act('revoke');await refresh()};
@@ -2734,13 +2858,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             body = page()
-            body = body.replace(b"</style></head>", HOME_CSS.encode("utf-8") + INTAKE_WORKFLOW_CSS.encode("utf-8") + b"</style></head>", 1)
+            body = body.replace(b"</style></head>", HOME_CSS.encode("utf-8") + INTAKE_WORKFLOW_CSS.encode("utf-8") + MEDIA_MANAGEMENT_CSS.encode("utf-8") + b"</style></head>", 1)
             body = body.replace(b"<main>", b"<main>" + HOME_HTML.encode("utf-8"), 1)
             old_owner_nav = '<nav class="owner-nav" aria-label="Điều hướng Admin"><a href="#home-dashboard">Home</a><a href="#intake-section">Nhập nguồn</a><a href="#review-section">Content / xác nhận dữ kiện</a><a href="/website">Quản lý Website</a></nav>'.encode("utf-8")
             body = body.replace(old_owner_nav, OWNER_NAV_HTML.encode("utf-8"), 1)
             body = body.replace(b'<section class="card"><p class="kicker">QUEUE</p>', b'<section id="queue-section" class="card"><p class="kicker">QUEUE</p>', 1)
             body = body.replace(b"</main><script>", MISSING_FIELDS_MARKUP.encode("utf-8") + b"</main><script>", 1)
-            body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + INTAKE_WORKFLOW_SCRIPT.encode("utf-8") + b'</body></html>', 1)
+            body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + INTAKE_WORKFLOW_SCRIPT.encode("utf-8") + MEDIA_MANAGEMENT_SCRIPT.encode("utf-8") + b'</body></html>', 1)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -3116,6 +3240,29 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         one_touch_match = re.fullmatch(r"/api/intakes/([^/]+)/create-content", path)
+        media_edit_match = re.fullmatch(r"/api/intakes/([^/]+)/media-edit", path)
+        if media_edit_match:
+            try:
+                if self.headers.get("Content-Type", "").startswith("multipart/form-data"):
+                    fields, files = parse_multipart_intake(raw, self.headers.get("Content-Type", ""))
+                else:
+                    payload = json.loads(raw.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("MEDIA_EDIT_REQUEST_INVALID")
+                    fields, files = payload, []
+                result = update_saved_intake_media(
+                    media_edit_match.group(1), str(fields.get("action") or ""),
+                    int(fields.get("expected_media_revision", 0)),
+                    str(fields.get("media_id") or ""), files, self.owner_id())
+            except KeyError as exc:
+                self.send_json({"error": str(exc).strip("'")}, 404); return
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                code = str(exc) or "MEDIA_EDIT_REQUEST_INVALID"
+                status = 409 if code in {"STALE_INTAKE_MEDIA_REVISION", "MEDIA_EDIT_GATE_A_PROTECTED", "DUPLICATE_MEDIA"} else 400
+                self.send_json({"error": code}, status); return
+            except OSError:
+                self.send_json({"error": "MEDIA_EDIT_STORAGE_FAILED"}, 503); return
+            self.send_json(result, 200); return
         if one_touch_match:
             try:
                 payload = json.loads(raw.decode("utf-8"))
@@ -3176,12 +3323,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Không tìm thấy intake."}, 404)
                 return
             record = project_intake_prefill(record)
-            if record.get("conflicts"):
-                self.send_json({"error": "INTAKE_SOURCE_CONFLICT", "conflicts": record["conflicts"],
-                                "provider_calls": 0}, 409)
-                return
             try:
                 with PROPERTY_OPERATION_LOCK:
+                    record = next((x for x in load_index() if x.get("id") == process_match.group(1)), None)
+                    if not record:
+                        self.send_json({"error": "Không tìm thấy intake."}, 404)
+                        return
+                    record = project_intake_prefill(record)
+                    if record.get("conflicts"):
+                        self.send_json({"error": "INTAKE_SOURCE_CONFLICT", "conflicts": record["conflicts"],
+                                        "provider_calls": 0}, 409)
+                        return
                     package = process_intake(center.store, center, record, ai_gateway=AI_GATEWAY, operation_id=record["id"])
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, 400)
