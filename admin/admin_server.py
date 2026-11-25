@@ -1411,8 +1411,11 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
                 target.chmod(0o600)
                 digest = media_sha256(content)
                 media.append({"mediaId": media_identity(digest), "filename": filename, "storedFilename": stored_filename, "path": str((folder / stored_filename).relative_to(PRIVATE_ROOT)), "bytes": len(content), "sha256": digest})
-            owner_evidence = {"rights_status": fields.get("evidence_rights", "").strip()}
-            record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "inputRevision": 1, "sourceNoteRevision": 1, "status": "RECEIVED", "note": fields.get("note", ""), "ownerEvidence": owner_evidence, "ownerEvidenceRevision": 0, "preliminaryFacts": {}, "ownerFacts": {}, "ownerFactsRevision": 0, "media": media, "missingFields": [], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
+            note = str(fields.get("note", ""))
+            owner_evidence = {"source_id": f"intake:{intake_id}", "claim": note.strip()[:1200],
+                              "rights_status": fields.get("evidence_rights", "").strip().upper()}
+            owner_evidence_revision = 1 if owner_evidence["rights_status"] in {"PERSONAL", "COMPANY", "APPROVED"} else 0
+            record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "inputRevision": 1, "sourceNoteRevision": 1, "status": "RECEIVED", "note": note, "ownerEvidence": owner_evidence, "ownerEvidenceRevision": owner_evidence_revision, "preliminaryFacts": {}, "ownerFacts": {}, "ownerFactsRevision": 0, "media": media, "missingFields": [], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
             record = project_intake_prefill(record)
             (staging / "metadata.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             (staging / "metadata.json").chmod(0o600)
