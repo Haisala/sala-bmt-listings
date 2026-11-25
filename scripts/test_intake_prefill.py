@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 from http.server import ThreadingHTTPServer
@@ -58,6 +59,29 @@ def main() -> None:
     assert rental_with_incidental_sale_word["facts"]["transaction_type"] == "RENT"
     assert rental_with_incidental_sale_word["facts"]["price_vnd_per_month"] == 6_500_000
     assert not any(x["field"] == "transaction_type" for x in rental_with_incidental_sale_word["conflicts"])
+
+    # A conflict persisted by the older parser is stale when today's parser
+    # finds one clear transaction. The GET projection clears it without
+    # mutating the saved intake; a separately marked Owner conflict remains.
+    legacy_parser_conflict = {
+        "field": "transaction_type", "kind": "SOURCE_CONFLICT",
+        "candidates": ["RENT", "SALE"], "evidence": ["ban cong", "gia thue"],
+    }
+    saved_with_stale_conflict = {
+        "id": "TEST_ONLY-stale-parser-conflict",
+        "note": "Căn hộ cho thuê, ban công rộng; giá thuê 6 triệu/tháng",
+        "conflicts": [legacy_parser_conflict], "media": [],
+    }
+    saved_before_projection = deepcopy(saved_with_stale_conflict)
+    stale_projection = admin.project_intake_prefill(saved_with_stale_conflict)
+    assert stale_projection["preliminaryFacts"]["transaction_type"] == "RENT"
+    assert not any(c.get("field") == "transaction_type" for c in stale_projection["conflicts"])
+    assert saved_with_stale_conflict == saved_before_projection
+
+    owner_conflict = {**legacy_parser_conflict, "origin": "OWNER_RECORDED"}
+    owner_conflict_record = {**saved_with_stale_conflict, "conflicts": [owner_conflict]}
+    owner_conflict_projection = admin.project_intake_prefill(owner_conflict_record)
+    assert owner_conflict in owner_conflict_projection["conflicts"]
 
     explicit_sale = extract_source_facts(
         "Cần bán căn hộ EcoCity; giá bán 2 tỷ",

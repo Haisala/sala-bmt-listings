@@ -1173,9 +1173,25 @@ def project_intake_prefill(record: dict[str, Any]) -> dict[str, Any]:
     for field, resolution in resolved.items():
         if isinstance(resolution, dict) and str(facts.get(field)) == str(resolution.get("value")):
             conflicts = [conflict for conflict in conflicts if conflict.get("field") != field]
-    # Keep pre-existing explicit conflicts unless the Owner resolved that field.
+    # Preserve saved conflicts except stale parser-derived SOURCE_CONFLICT rows.
+    # Older parsers persisted these rows in the intake index. If the current
+    # parser now has one unambiguous candidate for that field, the old derived
+    # conflict must not keep blocking the read model. The source record remains
+    # untouched; owner-authored/extended conflicts continue to be fail-closed.
+    parsed_conflict_fields = {
+        str(conflict.get("field")) for conflict in parsed.get("conflicts", [])
+        if isinstance(conflict, dict)
+    }
     for conflict in item.get("conflicts", []) if isinstance(item.get("conflicts"), list) else []:
-        if isinstance(conflict, dict) and conflict.get("field") not in resolved:
+        if not isinstance(conflict, dict) or conflict.get("field") in resolved:
+            continue
+        is_legacy_derived_conflict = (
+            conflict.get("kind") == "SOURCE_CONFLICT"
+            and set(conflict) == {"field", "kind", "candidates", "evidence"}
+            and conflict.get("field") in parsed_facts
+            and conflict.get("field") not in parsed_conflict_fields
+        )
+        if not is_legacy_derived_conflict:
             conflicts.append(conflict)
     evidence = item.get("ownerEvidence") if isinstance(item.get("ownerEvidence"), dict) else {}
     generated_source_id = parsed.get("source_id") or f"intake:{intake_id}:source:r{source_revision}"
