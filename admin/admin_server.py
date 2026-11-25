@@ -1024,18 +1024,19 @@ def intake_content_readiness(record: dict[str, Any]) -> tuple[list[str], list[st
     transaction = str(facts.get("price_type") or facts.get("transaction_type") or "").strip().upper()
     if transaction not in {"SALE", "RENT"}:
         missing.append("transaction_type")
-    amount_key = "price_vnd_per_month" if transaction == "RENT" else "price_vnd"
-    amount = facts.get(amount_key)
-    amount_ok = isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount > 0
-    if isinstance(amount, str):
-        try:
-            amount_ok = float(amount.strip().replace(",", ".")) > 0
-        except ValueError:
-            amount_ok = False
-    if not amount_ok:
-        missing.append(amount_key)
-    if transaction == "RENT" and str(facts.get("price_cycle") or "").upper() != "MONTH":
-        missing.append("price_cycle")
+    else:
+        amount_key = "price_vnd_per_month" if transaction == "RENT" else "price_vnd"
+        amount = facts.get(amount_key)
+        amount_ok = isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount > 0
+        if isinstance(amount, str):
+            try:
+                amount_ok = float(amount.strip().replace(",", ".")) > 0
+            except ValueError:
+                amount_ok = False
+        if not amount_ok:
+            missing.append(amount_key)
+        if transaction == "RENT" and str(facts.get("price_cycle") or "").upper() != "MONTH":
+            missing.append("price_cycle")
     kind = str(facts.get("property_type") or "").upper()
     if kind in {"HOUSE", "NHÀ", "NHA", "HOUSE_TYPE"}:
         for key in ("house_type", "bedrooms", "bathrooms"):

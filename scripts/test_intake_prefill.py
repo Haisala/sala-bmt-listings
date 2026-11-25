@@ -59,6 +59,22 @@ def main() -> None:
     assert labeled["facts"]["price_vnd"] == 16_500_000_000
     assert labeled["conflicts"] == []
 
+    undecided = {
+        "id": "TEST_ONLY-transaction-undecided",
+        "note": "Biệt thự EcoCity; diện tích đất: 250 m²; giá 16,5 tỷ",
+        "preliminaryFacts": {},
+        "media": [],
+    }
+    projected = admin.project_intake_prefill(undecided)
+    missing_fields, missing_rights = admin.intake_content_readiness(projected)
+    assert "transaction_type" in missing_fields and "price_vnd" not in missing_fields
+    assert missing_rights == ["rights_status"]
+    for transaction, expected_price in (("SALE", "price_vnd"), ("RENT", "price_vnd_per_month")):
+        selected = {**undecided, "ownerFacts": {"transaction_type": transaction}}
+        selected_missing, _ = admin.intake_content_readiness(admin.project_intake_prefill(selected))
+        assert expected_price in selected_missing
+        assert ("price_cycle" in selected_missing) == (transaction == "RENT")
+
     conflict = extract_source_facts(
         "Bán hay cho thuê căn hộ; diện tích 70 m² hoặc 80 m²; giá 2 tỷ hoặc 3 tỷ",
         intake_id="TEST_ONLY-conflict",
