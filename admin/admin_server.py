@@ -48,9 +48,9 @@ from property_memory.staging_artifact_writer import StagingArtifactError, withdr
 from property_memory.ai9_layers import OWNER_CONFIRMED_TEST_COMMENT, OWNER_CONFIRMED_TEST_REVIEW, run_ai9_preview, run_gate_b, approve_gate_b
 from property_memory.content_studio import build_copy_studio_preview, build_generative_internal_draft, build_generative_content_batch, GENERATIVE_MODE
 try:
-    from .one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP
+    from .one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP, OWNER_NAV_HTML
 except ImportError:  # Running admin_server.py as the service entrypoint.
-    from one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP
+    from one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP, OWNER_NAV_HTML
 from property_memory.evidence import validate_evidence_payload
 from property_memory.keychain import CredentialError, resolve_openai_key
 from property_memory.runtime_config import diagnostic_payload, health_payload, load_runtime_config
@@ -972,6 +972,38 @@ def project_intake_prefill(record: dict[str, Any]) -> dict[str, Any]:
             conflicts.append(conflict)
     evidence = item.get("ownerEvidence") if isinstance(item.get("ownerEvidence"), dict) else {}
     generated_source_id = parsed.get("source_id") or f"intake:{intake_id}:source:r{source_revision}"
+    price_candidates = parsed.get("price_candidates", [])
+    if not isinstance(price_candidates, list):
+        price_candidates = []
+    bound_price_provenance: dict[str, dict[str, Any]] = {}
+    selected_transaction = str(owner.get("transaction_type") or "").strip().upper()
+    if selected_transaction in {"SALE", "RENT"} and len(price_candidates) == 1:
+        price_key = "price_vnd_per_month" if selected_transaction == "RENT" else "price_vnd"
+        has_price_conflict = any(isinstance(conflict, dict) and conflict.get("field") == price_key
+                                 for conflict in conflicts)
+        candidate_price = price_candidates[0]
+        amount = candidate_price.get("amount_vnd") if isinstance(candidate_price, dict) else None
+        current_amount = facts.get(price_key)
+        candidate_is_selected = (current_amount in (None, "") or
+                                 (isinstance(current_amount, (int, float)) and not isinstance(current_amount, bool)
+                                  and current_amount == amount))
+        if (not has_price_conflict and candidate_is_selected
+                and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0):
+            if current_amount in (None, ""):
+                facts[price_key] = amount
+            provenance_entry = {
+                "intake_id": intake_id,
+                "source_id": generated_source_id,
+                "source_revision": int(candidate_price.get("source_revision") or source_revision),
+                "origin": "SOURCE_CANDIDATE_BOUND_BY_OWNER_TRANSACTION",
+                "evidence_excerpt": candidate_price.get("evidence_excerpt", ""),
+            }
+            bound_price_provenance[price_key] = provenance_entry
+            if selected_transaction == "RENT" and facts.get("price_cycle") in (None, ""):
+                facts["price_cycle"] = "MONTH"
+                bound_price_provenance["price_cycle"] = {
+                    **provenance_entry, "origin": "OWNER_SELECTED_MONTHLY_RENT_FIELD",
+                }
     note = str(item.get("note") or "")
     system_claim = note[:1200].strip() or f"Original source record for Intake {intake_id}, revision {source_revision}."
     prior_source_id = evidence.get("source_id")
@@ -981,12 +1013,14 @@ def project_intake_prefill(record: dict[str, Any]) -> dict[str, Any]:
     evidence = {**evidence, "source_id": source_id, "claim": claim,
                 "rights_status": evidence.get("rights_status") or ""}
     provenance = dict(parsed.get("provenance", {}))
+    provenance.update(bound_price_provenance)
     for field in owner:
         provenance[field] = {"intake_id": intake_id, "source_id": source_id,
                              "source_revision": source_revision, "origin": "OWNER_PROVIDED"}
     item["preliminaryFacts"] = facts
     item["ownerEvidence"] = evidence
     item["factProvenance"] = provenance
+    item["priceCandidates"] = price_candidates
     item["sourcePrefillVersion"] = 1
     item["conflicts"] = conflicts
     return item
@@ -1222,7 +1256,7 @@ const $=s=>document.querySelector(s);const mojibake={'C�� nh��n':'Cá nh
 async function loadReviews(){const r=await fetch('/api/reviews');const d=await r.json();if(!r.ok){$('#reviews').textContent=d.error||'Không tải được review';return}$('#reviews').innerHTML=d.length?d.map(x=>`<div class="item"><button class="secondary" data-review="${esc(x.review_id)}">Mở</button> <b>${esc(x.state)}</b> · ${esc(x.source||'')} · ${esc(x.intake_id||'')} · revision ${x.review_revision}</div>`).join(''):'Chưa có review.';document.querySelectorAll('[data-review]').forEach(b=>b.onclick=()=>loadReview(b.dataset.review))}
 async function loadReview(id){const r=await fetch('/api/reviews/'+encodeURIComponent(id));const x=await r.json();if(!r.ok){$('#review-detail').textContent=x.error;return}const ia=x.internal_analysis||{},ds=ia.deal_score||{};$('#review-detail').innerHTML=`<div class="item"><h3>${esc(x.state)} · revision ${x.review_revision}</h3><h4>Nguồn / provenance</h4><pre>${esc(JSON.stringify(x.candidate?.raw||x.candidate?.provenance||{},null,2))}</pre><h4>Property facts</h4><pre>${esc(JSON.stringify(x.candidate?.facts||{},null,2))}</pre><h4>Thiếu / chưa Owner xác nhận</h4><pre>${esc(JSON.stringify(x.candidate?.missing_fields||[],null,2))}</pre><h4>Market / Comparable / Valuation</h4><pre>${esc(JSON.stringify({snapshot:x.market_snapshot?.market_snapshot_id,comparables:x.comparable_set?.status,valuation:x.valuation?.valuation_summary||x.valuation},null,2))}</pre><h4>AI Internal Analysis · PRIVATE</h4><pre>${esc(JSON.stringify({score:ds, strengths:ia.strengths, risks:ia.weaknesses_risks, anomalies:ia.anomalies, missing:ia.missing_information, questions:ia.questions_to_verify, recommendation:ia.recommended_action, confidence:ia.confidence},null,2))}</pre><p class="err">${x.state==='STALE_REVIEW'?'Phân tích đã cũ; không thể duyệt.':''}</p><label>Sửa field</label><input id="review-field" placeholder="ví dụ transaction_type, price_vnd_per_month, house_type, bedrooms"><input id="review-value" placeholder="Giá trị mới"><button data-edit-review>SAVE REVIEW REVISION</button> <button data-approve-review ${x.state==='STALE_REVIEW'||x.state==='REJECTED'?'disabled':''}>DUYỆT GATE A</button> <button data-reject-review>BỎ / TỪ CHỐI</button><p id="review-msg"></p></div>`;document.querySelector('[data-edit-review]').onclick=()=>reviewAction(id,'edit',x.review_revision,{field:$('#review-field').value,value:$('#review-value').value,owner_id:'owner'});document.querySelector('[data-approve-review]').onclick=()=>reviewAction(id,'approve',x.review_revision,{decision:'CREATE_NEW_PROPERTY',idempotency_key:'ui:'+id+':'+x.review_revision,owner_id:'owner'});document.querySelector('[data-reject-review]').onclick=()=>reviewAction(id,'reject',x.review_revision,{reason:'Owner rejected',owner_id:'owner'})}
 async function reviewAction(id,kind,revision,extra){const r=await fetch('/api/reviews/'+id+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:revision,...extra})});const d=await r.json();const gateErrors={MISSING_FIELDS_REQUIRE_OWNER:'Cần Owner bổ sung/xác nhận trường bắt buộc theo loại BĐS.',PROPERTY_TYPE_UNSUPPORTED:'Loại BĐS chưa có quy tắc Gate A.',RENT_PERIOD_NOT_SUPPORTED_BY_PROPERTY_CORE:'Property Core hiện chỉ lưu được giá thuê theo tháng; kỳ hạn này chưa thể duyệt.',SALE_PRICE_PERIOD_INVALID:'Giá bán không nhận chu kỳ thuê.'};$('#review-msg').textContent=r.ok?'Đã cập nhật: '+(d.state||'OK'):(gateErrors[d.error]||d.error||'Lỗi');loadReviews();if(r.ok)loadReview(id)}
-async function load(){const r=await fetch('/api/intakes',{credentials:'same-origin',cache:'no-store'});const rows=await r.json();if(!r.ok){$('#queue').textContent=rows.error||'Không tải được Intake';return}window.intakeRecords=rows;const host=$('#queue');host.replaceChildren();const isTestOnly=x=>x.source==='TEST_ONLY'||[x.sourceGroup,x.note,x.clientBatchId].some(v=>String(v||'').includes('TEST_ONLY'));const hidden=rows.filter(isTestOnly).length;const visible=rows.filter(x=>!isTestOnly(x));if(hidden){const note=document.createElement('p');note.className='muted';note.textContent=hidden+' intake TEST_ONLY được ẩn khỏi hàng đợi vận hành; dữ liệu chưa bị xóa.';host.append(note)}if(!visible.length){const empty=document.createElement('p');empty.textContent='Chưa có intake cần xử lý.';host.append(empty);return}for(const x of visible){const row=document.createElement('article');row.className='item';const title=document.createElement('b');title.textContent=x.id;const state=document.createElement('span');state.className='status';state.textContent=x.status||'RECEIVED';const detail=document.createElement('div');detail.textContent=(x.source||'')+' · '+(x.createdAt||'');const note=document.createElement('div');note.className='muted';note.textContent=(x.media||[]).length+' media · '+(x.note||'Không có ghi chú');row.append(title,document.createTextNode(' '),state,detail,note);if(['RECEIVED','DRAFT_NEEDS_REVIEW'].includes(x.status||'RECEIVED')){const action=document.createElement('button');action.type='button';action.textContent='TIẾP TỤC XỬ LÝ';action.onclick=()=>createContent(x.id,action);row.append(action)}else if(x.status==='CONTENT_CREATED'&&x.contentReviewId){const action=document.createElement('button');action.type='button';action.textContent='XEM 5 CONTENT';action.onclick=async()=>{await loadReviews();await window.loadReview(x.contentReviewId);document.querySelector('#review-section').scrollIntoView({behavior:'smooth'})};row.append(action)}const msg=document.createElement('p');msg.setAttribute('data-intake-action-status','');msg.setAttribute('role','status');row.append(msg);host.append(row)}}
+async function load(){const r=await fetch('/api/intakes',{credentials:'same-origin',cache:'no-store'});const rows=await r.json();if(!r.ok){$('#queue').textContent=rows.error||'Không tải được Intake';return}window.intakeRecords=rows;const host=$('#queue');host.replaceChildren();const isTestOnly=x=>x.source==='TEST_ONLY'||[x.sourceGroup,x.note,x.clientBatchId].some(v=>String(v||'').includes('TEST_ONLY'));const hidden=rows.filter(isTestOnly).length;const visible=rows.filter(x=>!isTestOnly(x));if(hidden){const note=document.createElement('p');note.className='muted';note.textContent=hidden+' intake TEST_ONLY được ẩn khỏi hàng đợi vận hành; dữ liệu chưa bị xóa.';host.append(note)}if(!visible.length){const empty=document.createElement('p');empty.textContent='Chưa có intake cần xử lý.';host.append(empty);return}for(const x of visible){const row=document.createElement('article');row.className='item';row.dataset.intakeId=x.id;const title=document.createElement('b');title.textContent=x.id;const state=document.createElement('span');state.className='status';state.textContent=x.status||'RECEIVED';const detail=document.createElement('div');detail.textContent=(x.source||'')+' · '+(x.createdAt||'');const note=document.createElement('div');note.className='muted';note.textContent=(x.media||[]).length+' media · '+(x.note||'Không có ghi chú');row.append(title,document.createTextNode(' '),state,detail,note);if(['RECEIVED','DRAFT_NEEDS_REVIEW'].includes(x.status||'RECEIVED')){const action=document.createElement('button');action.type='button';action.textContent='TIẾP TỤC XỬ LÝ';action.onclick=()=>createContent(x.id,action);row.append(action)}else if(x.status==='CONTENT_CREATED'&&x.contentReviewId){const action=document.createElement('button');action.type='button';action.textContent='XEM 5 CONTENT';action.onclick=async()=>{window.navigateAdminScreen?.('content',{intakeId:x.id,reviewId:x.contentReviewId});await loadReviews();await window.loadReview(x.contentReviewId)};row.append(action)}const msg=document.createElement('p');msg.setAttribute('data-intake-action-status','');msg.setAttribute('role','status');row.append(msg);host.append(row)}}
 const intakeForm=$('#intake'),mediaInput=$('#intake-media-input'),addMedia=$('#intake-add-media'),mediaCount=$('#intake-media-count'),mediaList=$('#intake-media-list'),previewDialog=$('#intake-preview'),previewImage=$('#intake-preview-image'),previewClose=$('#intake-preview-close'),saveIntake=$('#intake-save'),newIntake=$('#intake-new');let intakeFiles=[],intakeBusy=false,intakeScanGeneration=0;let pendingSavedIntakeId=null;newIntake.onclick=()=>{if(!pendingSavedIntakeId)return;intakeForm.reset();pendingSavedIntakeId=null;newIntake.hidden=true;intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)});intakeFiles=[];renderIntakeFiles();$('#intake-msg').textContent='Nguồn Intake trước đã lưu trong Queue.'};async function createContent(intakeId,button){if(button?.disabled)return;if(button)button.disabled=true;const statusNode=button?.closest('article')?.querySelector('[data-intake-action-status]')||$('#intake-msg');statusNode.className='muted';statusNode.textContent='Đang kiểm tra đúng Intake và quyền nguồn…';const keyName='sala-content-idem:'+intakeId;let key=sessionStorage.getItem(keyName);if(!key){key=crypto.randomUUID().replace(/-/g,'');sessionStorage.setItem(keyName,key)}try{const r=await fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/create-content',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({idempotency_key:key})});let d;try{d=await r.json()}catch(_){throw Error('Máy chủ trả phản hồi không hợp lệ; giữ khóa chống lặp để không gửi lại tự động.')}if(r.status!==201&&r.status!==200){if(r.status<500&&d.error!=='CONTENT_REQUEST_OUTCOME_UNKNOWN')sessionStorage.removeItem(keyName);if(d.error==='CONTENT_PREREQUISITES_REQUIRED'&&window.openMissingFields){await load();const record=(window.intakeRecords||[]).find(x=>x.id===intakeId);window.openMissingFields(intakeId,d,record)}else{statusNode.className='err';statusNode.textContent=(d.error||'CONTENT_CREATE_FAILED')+(d.provider_calls===0?' · Chưa gọi AI.':'')+' · Intake đã lưu: '+intakeId+'.';await load();if(d.review_id){await loadReviews();await window.loadReview(d.review_id)}}return false}sessionStorage.removeItem(keyName);statusNode.className='ok';statusNode.textContent='Đã tạo 5 Content riêng tư · '+d.review_id+' · '+d.content_batch_id+' · chưa duyệt, chưa đăng.';await load();await loadReviews();await window.loadReview(d.review_id);return true}catch(e){statusNode.className='err';statusNode.textContent=(e.message||'Không rõ kết quả')+' · Intake đã lưu: '+intakeId+'. Khóa chống lặp được giữ; hãy kiểm tra Queue trước khi thử lại.';await load();return false}finally{if(button)button.disabled=false}}
 const isImageFile=file=>file.type.startsWith('image/')||/\\.(jpe?g|png|webp|heic)$/i.test(file.name);
 function renderIntakeFiles(){mediaCount.textContent=intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length===1?'1 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn';mediaList.replaceChildren();intakeFiles.forEach((item,index)=>{const card=document.createElement('div');card.className='intake-media-card';if(item.url){const open=document.createElement('button');open.type='button';open.className='intake-media-open';open.setAttribute('aria-label','Phóng to '+item.file.name);const img=document.createElement('img');img.className='intake-media-thumb';img.src=item.url;img.alt=item.file.name;open.append(img);open.onclick=()=>{previewImage.src=item.url;previewImage.alt=item.file.name;if(previewDialog.showModal)previewDialog.showModal();else window.open(item.url,'_blank','noopener')};card.append(open)}else{const icon=document.createElement('div');icon.className='intake-media-thumb';icon.textContent='TỆP';icon.setAttribute('aria-hidden','true');icon.style.display='grid';icon.style.placeItems='center';card.append(icon)}const name=document.createElement('span');name.className='intake-media-name';name.textContent=item.file.name+' · '+Math.ceil(item.file.size/1024)+' KB';card.append(name);if(item.duplicate){const badge=document.createElement('span');badge.className='intake-media-duplicate';badge.textContent='Ảnh trùng bytes · máy chủ sẽ giữ bản đầu';card.append(badge)}const remove=document.createElement('button');remove.type='button';remove.className='remove-media';remove.textContent='Bỏ ảnh/tệp';remove.disabled=intakeBusy;remove.onclick=()=>{if(item.url)URL.revokeObjectURL(item.url);intakeFiles.splice(index,1);scanIntakeDuplicates()};card.append(remove);mediaList.append(card)})}
@@ -2257,6 +2291,23 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/health":
             self.runtime_json(); return
+        brand_assets = {"/assets/brand/full-dark.png": "full-dark.png",
+                        "/assets/brand/b-mark.png": "b-mark.png"}
+        if path in brand_assets:
+            asset = PROJECT_ROOT / "assets" / "brand" / brand_assets[path]
+            try:
+                payload = asset.read_bytes()
+            except OSError:
+                self.send_json({"error": "BRAND_ASSET_NOT_FOUND"}, 404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "public, max-age=86400, immutable")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if path == "/website":
             if not self.require_auth():
                 return
@@ -2298,6 +2349,8 @@ class Handler(BaseHTTPRequestHandler):
             body = page()
             body = body.replace(b"</style></head>", HOME_CSS.encode("utf-8") + b"</style></head>", 1)
             body = body.replace(b"<main>", b"<main>" + HOME_HTML.encode("utf-8"), 1)
+            old_owner_nav = '<nav class="owner-nav" aria-label="Điều hướng Admin"><a href="#home-dashboard">Home</a><a href="#intake-section">Nhập nguồn</a><a href="#review-section">Content / xác nhận dữ kiện</a><a href="/website">Quản lý Website</a></nav>'.encode("utf-8")
+            body = body.replace(old_owner_nav, OWNER_NAV_HTML.encode("utf-8"), 1)
             body = body.replace(b'<section class="card"><p class="kicker">QUEUE</p>', b'<section id="queue-section" class="card"><p class="kicker">QUEUE</p>', 1)
             body = body.replace(b"</main><script>", MISSING_FIELDS_MARKUP.encode("utf-8") + b"</main><script>", 1)
             body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + b'</body></html>', 1)

@@ -48,6 +48,16 @@ def main() -> None:
     assert rental["facts"]["price_vnd_per_month"] == 6_000_000
     assert rental["facts"]["price_cycle"] == "MONTH"
 
+    decimal_source = "Biệt thự song lập mặt hồ điều hòa EcoCity - 16,5 tỷ; đất 250m² (10x25), xây dựng 400m²"
+    decimal_candidate = extract_source_facts(decimal_source, intake_id="TEST_ONLY-decimal", source_revision=4)
+    assert decimal_candidate["facts"]["title"] == "Biệt thự song lập mặt hồ điều hòa EcoCity"
+    assert "16,5" not in decimal_candidate["facts"]["title"]
+    assert "price_vnd" not in decimal_candidate["facts"]
+    assert decimal_candidate["price_candidates"] == [{
+        "amount_vnd": 16_500_000_000, "evidence_excerpt": "16,5 tỷ",
+        "source_revision": 4, "transaction_unconfirmed": True,
+    }]
+
     labeled = extract_source_facts(
         "Bán biệt thự EcoCity. Diện tích đất: 250 m², diện tích xây dựng: 400 m². "
         "Giá bán 16,5 tỷ; giá tham khảo 16,5 tỷ.",
@@ -69,11 +79,16 @@ def main() -> None:
     missing_fields, missing_rights = admin.intake_content_readiness(projected)
     assert "transaction_type" in missing_fields and "price_vnd" not in missing_fields
     assert missing_rights == ["rights_status"]
+    assert projected["priceCandidates"][0]["amount_vnd"] == 16_500_000_000
     for transaction, expected_price in (("SALE", "price_vnd"), ("RENT", "price_vnd_per_month")):
         selected = {**undecided, "ownerFacts": {"transaction_type": transaction}}
-        selected_missing, _ = admin.intake_content_readiness(admin.project_intake_prefill(selected))
-        assert expected_price in selected_missing
-        assert ("price_cycle" in selected_missing) == (transaction == "RENT")
+        selected_projected = admin.project_intake_prefill(selected)
+        selected_missing, _ = admin.intake_content_readiness(selected_projected)
+        assert selected_projected["preliminaryFacts"][expected_price] == 16_500_000_000
+        assert selected_projected["factProvenance"][expected_price]["origin"] == "SOURCE_CANDIDATE_BOUND_BY_OWNER_TRANSACTION"
+        assert expected_price not in selected_missing
+        assert ("price_cycle" in selected_missing) is False
+        assert selected_projected["preliminaryFacts"].get("price_cycle") == ("MONTH" if transaction == "RENT" else None)
 
     conflict = extract_source_facts(
         "Bán hay cho thuê căn hộ; diện tích 70 m² hoặc 80 m²; giá 2 tỷ hoặc 3 tỷ",
@@ -135,12 +150,22 @@ def main() -> None:
                 assert row["preliminaryFacts"]["construction_area"] == 400
                 assert row["factProvenance"]["price_vnd"]["intake_id"] == saved["id"]
                 assert row["ownerEvidence"]["rights_status"] == ""
+                with urllib.request.urlopen(base + "/assets/brand/full-dark.png", timeout=4) as response:
+                    assert response.status == 200 and response.headers.get_content_type() == "image/png"
+                    assert response.read(8) == b"\x89PNG\r\n\x1a\n"
                 with urllib.request.urlopen(urllib.request.Request(base + "/", headers=headers), timeout=4) as response:
                     home = response.read().decode("utf-8")
                 assert home.count('class="home-metric"') == 4
                 assert home.count('class="home-actions"') == 1 and "Hành động nhanh" in home
                 assert home.count("<li>") >= 5
                 assert 'class="home-bottom-nav"' in home and "display:none" in home
+                assert 'id="home-dashboard"' in home and 'data-screen-view="home"' not in home
+                assert 'data-screen-link="intake"' in home and 'data-screen-link="content"' in home
+                assert 'href="#intake-section"' not in home and 'href="#review-section"' not in home
+                assert 'data-dynamic-price' in home and 'SOURCE_CANDIDATE_BOUND_BY_OWNER_TRANSACTION' not in home
+                assert "function selectedScreen()" in home and "window.navigateAdminScreen=navigateScreen" in home
+                assert "row.dataset.intakeId=x.id" in home and "navigateScreen('content',{intakeId:row.id" in home
+                assert "16,5" not in home
                 assert "owner-analytics" not in home and 'id="analytics-from"' not in home
                 assert "data-home-ai-preflight" not in home and "source_id" in home
                 with urllib.request.urlopen(urllib.request.Request(base + "/website", headers=headers), timeout=4) as response:

@@ -114,6 +114,27 @@ def child() -> None:
                                   decision="CREATE_NEW_PROPERTY", idempotency_key="TEST_ONLY-gate-a-single-session")
         review_id = approved["review_id"]
         property_id = approved["mutation_result"]["property_id"]
+        # Publication requires a separately approved, public-safe media asset.
+        # Seed only synthetic evidence in this isolated TEST_ONLY store so this
+        # session test exercises the successful same-owner publication path.
+        import hashlib
+        from property_memory.projection_builder import _slug
+        appearance_id = store.list_source_appearances(property_id)[0]["appearance_id"]
+        slug = _slug(store.get(property_id)["title"])
+        image_bytes = b"\x89PNG\r\n\x1a\nTEST_ONLY-public-media"
+        media_ref = f"assets/images/{slug}/TEST_ONLY.png"
+        media_path = assets / media_ref
+        media_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        media_path.write_bytes(image_bytes)
+        digest = hashlib.sha256(image_bytes).hexdigest()
+        store.append_media_observation(property_id, {
+            "appearance_id": appearance_id, "media_ref": media_ref,
+            "media_sha256": digest, "role": "front", "rights_status": "PERSONAL", "active": True,
+        }, event_id="TEST_ONLY-single-session-public-media")
+        store.add_rights(property_id, {
+            "appearance_id": appearance_id, "rights_status": "PERSONAL",
+            "channel": "public_web", "approved": True,
+        }, rights_id="TEST_ONLY-single-session-public-rights")
         adm.configure_review_center(center)
         adm.SESSIONS[EXPIRED_SESSION_ID] = time.time() - 30
         adm.SESSION_OWNERS[EXPIRED_SESSION_ID] = "TEST_ONLY_OWNER"

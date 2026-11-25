@@ -373,7 +373,9 @@ def main() -> None:
         html_page = handler.wfile.getvalue().decode("utf-8")
         assert response["status"] == 200 and "Duyệt công bố riêng" in html_page
         assert "data-release-approve" in html_page and "data-release-revoke" in html_page
-        assert 'href="#intake-section"' in html_page and 'href="#review-section"' in html_page
+        # The current Admin shell uses separate screen routes, not long-page anchors.
+        assert 'data-screen-link="intake"' in html_page and 'data-screen-link="content"' in html_page
+        assert 'href="#intake-section"' not in html_page and 'href="#review-section"' not in html_page
         assert "local-only" not in html_page and "AI9 TEST ONLY" not in html_page
         assert "Chạy AI9 TEST_ONLY" not in html_page and "TẠO CONTENT" in html_page
         assert "min-height:44px;flex:1 1 180px" in html_page and 'name="viewport"' in html_page

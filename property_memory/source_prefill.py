@@ -95,11 +95,17 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
         if title:
             put("title", title, group)
     else:
-        title_match = re.search(r"\b(biet thu|nha pho|nha rieng|can ho|dat nen)\b([^,;.!\n]{0,70}?)(?=\s+(?:tai|o|khu vuc|dia chi|vi tri)\b|[,;.!\n]|$)", folded)
+        title_match = re.search(r"\b(biet thu|nha pho|nha rieng|can ho|dat nen)\b([^;!\n]{0,70}?)(?=\s+(?:tai|o|khu vuc|dia chi|vi tri)\b|,(?!\d)|\.(?!\d)|[;!\n]|$)", folded)
         if title_match:
             candidate_title, _, _ = _source_span(text, offsets, *title_match.span())
+            candidate_title = re.sub(
+                r"\s*(?:[-–—:]\s*)?\d+(?:[.,]\d+)?\s*(?:tỷ|tỉ|triệu|tr|nghìn|ngàn)\s*$",
+                "", candidate_title, flags=re.IGNORECASE,
+            ).strip(" -–—:")
             if candidate_title:
-                put("title", candidate_title, title_match.span())
+                folded_title, _ = _fold_with_offsets(candidate_title)
+                put("title", candidate_title,
+                    (title_match.start(), title_match.start() + len(folded_title)))
 
     # A location can be a named development/area; this is not treated as an
     # exact street address. Capture only source phrases with explicit context.
@@ -172,6 +178,20 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
         except InvalidOperation:
             continue
     distinct_amounts = {amount for amount, _ in parsed_amounts}
+    price_candidates: list[dict[str, Any]] = []
+    if (len(distinct_amounts) == 1 or compound_amount) and not (sale or rent or monthly):
+        if compound_amount:
+            amount, amount_span = compound_amount
+        else:
+            amount = parsed_amounts[0][0]
+            amount_span = (parsed_amounts[0][1].start(), parsed_amounts[-1][1].end())
+        excerpt, _, _ = _source_span(text, offsets, *amount_span)
+        price_candidates.append({
+            "amount_vnd": amount,
+            "evidence_excerpt": excerpt,
+            "source_revision": source_revision,
+            "transaction_unconfirmed": True,
+        })
     if len(distinct_amounts) == 1 or compound_amount:
         match = amounts[0]
         try:
@@ -197,4 +217,5 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
             put(field, int(match.group(1)), match.span())
 
     return {"facts": facts, "provenance": provenance, "conflicts": conflicts,
+            "price_candidates": price_candidates,
             "source_id": f"intake:{intake_id}:source:r{source_revision}"}
