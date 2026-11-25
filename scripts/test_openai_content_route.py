@@ -21,9 +21,9 @@ class Noop:
 class Provider:
     provider_name="TEST_ONLY_MOCK";model="gpt-6-luna"
     def __init__(self,count=5,facts_used=DEFAULT_FACTS_USED,normalized_facts=None,usage=DEFAULT_USAGE,input_fact_keys=DEFAULT_INPUT_KEYS):
-        self.calls=0;self.count=count;self.facts_used=facts_used;self.normalized_facts=normalized_facts or [];self.usage=usage;self.input_fact_keys=input_fact_keys
+        self.calls=0;self.count=count;self.facts_used=facts_used;self.normalized_facts=normalized_facts or [];self.usage=usage;self.input_fact_keys=input_fact_keys;self.last_payload=None
     def generate(self,payload):
-        self.calls+=1
+        self.calls+=1;self.last_payload=payload
         assert payload["output_count"]==5 and payload["media_analysis"]=="NOT_SENT"
         used=["title"] if self.facts_used is DEFAULT_FACTS_USED else self.facts_used
         usage={"input_tokens":100,"output_tokens":300,"total_tokens":400} if self.usage is DEFAULT_USAGE else self.usage
@@ -39,7 +39,8 @@ class Usage:
 
 def call(handler,intake_id,key,payload=None):
     out={};handler.send_json=lambda value,status=200:out.update(value=value,status=status)
-    admin.Handler.create_content_from_intake(handler,intake_id,{"idempotency_key":key,**(payload or {})});return out
+    admin.Handler.create_content_from_intake(handler,intake_id,{"idempotency_key":key,
+      "source_media_rights_confirmed":True,"external_text_processing_consent":True,**(payload or {})});return out
 
 def main():
   with tempfile.TemporaryDirectory(prefix="sala-one-touch-test-") as folder:
@@ -57,7 +58,10 @@ def main():
     intake={"id":"TEST_ONLY-intake-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-fixture",
       "note":"TEST_ONLY synthetic 72 square meter home in TEST_ONLY district",
       "preliminaryFacts":{"title":"TEST_ONLY-home","property_type":"HOUSE","transaction_type":"SALE","price_vnd":1000000000,"address":"TEST_ONLY address","area":"72 m²","house_type":"TEST_ONLY house","bedrooms":2,"bathrooms":1},
-      "ownerEvidence":{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"},"media":[]}
+      "ownerEvidence":{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"},
+      "media":[{"media_id":f"TEST_ONLY-media-{i:02d}","filename":f"TEST_ONLY-{i:02d}.jpg",
+                "path":f"inbox/TEST_ONLY/{i:02d}.jpg","sha256":f"{i:064x}","bytes":128}
+               for i in range(10)]}
     pkg=process_intake(store,center,intake,ai_gateway=None,operation_id=intake["id"])
     pkg=center.packages[pkg["review_id"]]
     pkg["evidence_revisions"]=[{"evidence_revision_id":"TEST_ONLY-evidence-r1","evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"}]}}]
@@ -70,12 +74,25 @@ def main():
          patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"HOST","127.0.0.1"), \
          patch.object(admin,"_CONTENT_LIVE_ENABLED",True),patch.object(admin,"_AI_PROVIDER",provider),patch.object(admin,"_USAGE_LEDGER",usage), \
          patch.object(admin,"load_index",lambda:records),patch.object(admin,"save_index",lambda items:None):
+      before_packages=len(center.packages)
+      consent_blocked=call(handler,intake["id"],"TEST_ONLY-missing-rights-confirmation-001",{"source_media_rights_confirmed":False})
+      assert consent_blocked["status"]==409
+      assert consent_blocked["value"]["error"]=="CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED"
+      assert consent_blocked["value"]["provider_calls"]==0 and provider.calls==0
+      assert len(center.packages)==before_packages and store.list_properties()==[]
+      external_consent_blocked=call(handler,intake["id"],"TEST_ONLY-missing-paid-consent-001",{"external_text_processing_consent":False})
+      assert external_consent_blocked["status"]==409
+      assert external_consent_blocked["value"]["error"]=="CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED"
+      assert external_consent_blocked["value"]["provider_calls"]==0 and provider.calls==0
+      assert len(center.packages)==before_packages and store.list_properties()==[]
       result=call(handler,intake["id"],"TEST_ONLY-idempotency-key-001")
       assert result["status"]==201,result
       body=result["value"]
       assert len(body["variants"])==5 and body["published"] is False and body["mutated_property_store"] is False
       assert intake["status"]=="CONTENT_CREATED" and intake["contentReviewId"]==body["review_id"]
       assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
+      assert len(center.packages[body["review_id"]]["candidate"]["media"])==10
+      assert provider.last_payload["media"]==[] and intake["note"] not in provider.last_payload.get("source_text","")
       assert body["generation"]["content_variant_ids"]==[v["content_variant_id"] for v in body["variants"]]
       assert all(v["intake_id"]==intake["id"] and v["review_id"]==body["review_id"]
                  and v["review_revision"]==body["review_revision"]
@@ -159,9 +176,23 @@ def main():
       with urllib.request.urlopen(draft_req,timeout=5) as response: draft_status=response.status;draft_body=json.loads(response.read())
       assert draft_status==201 and draft_body["input_revision"]==2
       assert http_intake["id"]==draft_body["id"] and http_store.list_properties()==[]
-      with urllib.request.urlopen(request,timeout=5) as response: status=response.status;http_body=json.loads(response.read())
+      try: urllib.request.urlopen(request,timeout=5)
+      except urllib.error.HTTPError as e: rights_status=e.code;rights_body=json.loads(e.read())
+      else: raise AssertionError("missing media/source-rights confirmation unexpectedly dispatched")
+      assert rights_status==409 and rights_body["error"]=="CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED"
+      assert rights_body["provider_calls"]==0 and http_provider.calls==0 and http_center.packages=={}
+      rights_only_request=urllib.request.Request(url,data=json.dumps({"idempotency_key":"TEST_ONLY-http-idempotency-001",
+        "source_media_rights_confirmed":True,"external_text_processing_consent":False}).encode(),method="POST",headers=request.headers)
+      try: urllib.request.urlopen(rights_only_request,timeout=5)
+      except urllib.error.HTTPError as e: consent_status=e.code;consent_body=json.loads(e.read())
+      else: raise AssertionError("missing external-processing consent unexpectedly dispatched")
+      assert consent_status==409 and consent_body["error"]=="CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED"
+      assert consent_body["provider_calls"]==0 and http_provider.calls==0 and http_center.packages=={}
+      consented_request=urllib.request.Request(url,data=json.dumps({"idempotency_key":"TEST_ONLY-http-idempotency-001",
+        "source_media_rights_confirmed":True,"external_text_processing_consent":True}).encode(),method="POST",headers=request.headers)
+      with urllib.request.urlopen(consented_request,timeout=5) as response: status=response.status;http_body=json.loads(response.read())
       assert status==201 and len(http_body["variants"])==5 and http_body["published"] is False
-      with urllib.request.urlopen(request,timeout=5) as response: replay_status=response.status;replay_body=json.loads(response.read())
+      with urllib.request.urlopen(consented_request,timeout=5) as response: replay_status=response.status;replay_body=json.loads(response.read())
       assert replay_status==200 and replay_body["content_batch_id"]==http_body["content_batch_id"]
       assert http_provider.calls==1 and len(http_usage.rows)==1 and http_store.list_properties()==[]
       http_intake_b={"id":"TEST_ONLY-intake-http-b","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-http-fixture-b","note":"TEST_ONLY separate source",

@@ -829,7 +829,9 @@ def run_e2e() -> None:
               "same_intake_draft_saved_with_rights", evidence, f"HTTP {status}")
         status, _, disabled_content = json_call(
             admin_origin + f"/api/intakes/{intake['id']}/create-content", method="POST",
-            obj={"idempotency_key": "TEST_ONLY-disabled-content-02"}, headers=admin_headers)
+            obj={"idempotency_key": "TEST_ONLY-disabled-content-02",
+                 "source_media_rights_confirmed": True,
+                 "external_text_processing_consent": True}, headers=admin_headers)
         check(status == 403 and disabled_content.get("error") == "CONTENT_PHASE_DISABLED"
               and disabled_content.get("provider_calls") == 0 and disabled_content.get("published") is False,
               "staging_content_provider_remains_disabled_after_prerequisites", evidence, f"HTTP {status}")

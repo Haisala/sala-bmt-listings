@@ -62,13 +62,33 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
     def put(field: str, value: Any, span: tuple[int, int]) -> None:
         facts[field], provenance[field] = _fact(value, text, offsets, span, intake_id, source_revision, text)
 
-    transaction_matches = list(re.finditer(r"\b(cho thue|thue|rent|rental|ban|sale)\b", folded))
-    transaction_values = {"RENT" if x.group(1) in {"cho thue", "thue", "rent", "rental"} else "SALE" for x in transaction_matches}
+    # Transaction intent must be explicit. Bare "ban" also matches unrelated
+    # Vietnamese words such as "ban cong" and role/context phrases; those must
+    # never conflict with a clearly stated rental listing.
+    rent_matches = list(re.finditer(
+        r"\b(?:cho\s+thue|can\s+thue|dang\s+thue|gia\s+thue|"
+        r"thue\s+(?:can\s+ho|nha|biet\s+thu|dat(?:\s+nen)?|phong|mat\s+bang)|"
+        r"for\s+rent|rental\s+(?:property|listing)|rent\s+(?:property|listing))\b",
+        folded,
+    ))
+    sale_matches = list(re.finditer(
+        r"\b(?:can\s+ban|dang\s+ban|rao\s+ban|gia\s+ban|"
+        r"ban\s+(?:can\s+ho|nha|biet\s+thu|dat(?:\s+nen)?|mat\s+bang)|"
+        r"ban\s+(?:hay|hoac)\s+(?:cho\s+thue|thue)|"
+        r"(?:can\s+ho|nha|biet\s+thu|dat(?:\s+nen)?)\s+(?:dang\s+)?ban|"
+        r"for\s+sale|sale\s+(?:property|listing))\b",
+        folded,
+    ))
+    transaction_matches = sorted(
+        [("RENT", match) for match in rent_matches] + [("SALE", match) for match in sale_matches],
+        key=lambda item: item[1].start(),
+    )
+    transaction_values = {kind for kind, _ in transaction_matches}
     if len(transaction_values) == 1 and transaction_matches:
-        match = transaction_matches[0]
-        put("transaction_type", next(iter(transaction_values)), match.span())
+        kind, match = transaction_matches[0]
+        put("transaction_type", kind, match.span())
     elif len(transaction_values) > 1:
-        conflicts.append({"field": "transaction_type", "kind": "SOURCE_CONFLICT", "candidates": sorted(transaction_values), "evidence": [_source_span(text, offsets, *m.span())[0] for m in transaction_matches]})
+        conflicts.append({"field": "transaction_type", "kind": "SOURCE_CONFLICT", "candidates": sorted(transaction_values), "evidence": [_source_span(text, offsets, *m.span())[0] for _, m in transaction_matches]})
 
     type_patterns = (("APARTMENT", r"\b(can ho|apartment)\b"),
                      ("HOUSE", r"\b(biet thu|nha pho|nha rieng|nha cap)\b"),

@@ -48,6 +48,45 @@ def main() -> None:
     assert rental["facts"]["price_vnd_per_month"] == 6_000_000
     assert rental["facts"]["price_cycle"] == "MONTH"
 
+    # A balcony ("ban cong") is incidental context, not a SALE intent. An
+    # explicit rental price and monthly period still produce rental facts.
+    rental_with_incidental_sale_word = extract_source_facts(
+        "Căn hộ cho thuê, ban công rộng; giá thuê 6,5 triệu/tháng. "
+        "Ghi chú tiếp thị nhắc đến khách mua và bên bán.",
+        intake_id="TEST_ONLY-rental-incidental-terms",
+    )
+    assert rental_with_incidental_sale_word["facts"]["transaction_type"] == "RENT"
+    assert rental_with_incidental_sale_word["facts"]["price_vnd_per_month"] == 6_500_000
+    assert not any(x["field"] == "transaction_type" for x in rental_with_incidental_sale_word["conflicts"])
+
+    explicit_sale = extract_source_facts(
+        "Cần bán căn hộ EcoCity; giá bán 2 tỷ",
+        intake_id="TEST_ONLY-explicit-sale",
+    )
+    assert explicit_sale["facts"]["transaction_type"] == "SALE"
+    assert not any(x["field"] == "transaction_type" for x in explicit_sale["conflicts"])
+
+    explicit_both = extract_source_facts(
+        "Bán hay cho thuê căn hộ; diện tích 70 m²",
+        intake_id="TEST_ONLY-explicit-sale-or-rent",
+    )
+    assert next(x for x in explicit_both["conflicts"] if x["field"] == "transaction_type")["candidates"] == ["RENT", "SALE"]
+
+    provider_facts, provider_excerpt = admin._provider_content_inputs({
+        "facts": {"title": "TEST_ONLY căn hộ", "address": "TEST_ONLY Tôn Đức Thắng 0901234567",
+                  "transaction_type": "RENT"},
+        "fact_provenance": {
+            "title": {"origin": "LOCAL_SOURCE_EXTRACTED", "evidence_excerpt": "Căn hộ TEST_ONLY"},
+            "address": {"origin": "LOCAL_SOURCE_EXTRACTED",
+                        "evidence_excerpt": "Tôn Đức Thắng · 0901234567 · owner@example.invalid · https://example.invalid"},
+        },
+        "raw": {"note": "TEST_ONLY full source text is not sent"},
+    })
+    assert "0901234567" not in provider_facts["address"]
+    assert "0901234567" not in provider_excerpt and "owner@example.invalid" not in provider_excerpt
+    assert "https://example.invalid" not in provider_excerpt and len(provider_excerpt) <= 320
+    assert "full source text is not sent" not in provider_excerpt
+
     decimal_source = "Biệt thự song lập mặt hồ điều hòa EcoCity - 16,5 tỷ; đất 250m² (10x25), xây dựng 400m²"
     decimal_candidate = extract_source_facts(decimal_source, intake_id="TEST_ONLY-decimal", source_revision=4)
     assert decimal_candidate["facts"]["title"] == "Biệt thự song lập mặt hồ điều hòa EcoCity"
