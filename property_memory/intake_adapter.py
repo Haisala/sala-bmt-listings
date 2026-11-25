@@ -85,6 +85,7 @@ def to_candidate(intake: dict[str, Any]) -> dict[str, Any]:
         "source": source, "source_class": _source_class(source), "source_type": _clean(intake.get("sourceType")),
         "source_group": _clean(intake.get("sourceGroup")), "received_at": _clean(intake.get("receivedAt") or intake.get("sourceDate") or intake.get("createdAt")),
         "facts": facts, "media": media,
+        "fact_provenance": deepcopy(intake.get("factProvenance", {})) if isinstance(intake.get("factProvenance", {}), dict) else {},
         "raw": {"note": intake.get("note"), "text": intake.get("text") or intake.get("note"), "preliminaryFacts": deepcopy(intake.get("preliminaryFacts") or intake.get("preliminary") or intake.get("facts") or {}), "intake": deepcopy(intake)},
         "missing_fields": sorted(set(str(x) for x in missing)),
         "uncertain_fields": list(intake.get("uncertainFields", [])) if isinstance(intake.get("uncertainFields", []), list) else [],

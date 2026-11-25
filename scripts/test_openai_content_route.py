@@ -48,7 +48,8 @@ def main():
     with patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"INBOX_ROOT",inbox),patch.object(admin,"INDEX_PATH",private/"index.json"):
       saved,replay,_=admin.create_intake_record({"source":"Cá nhân","note":"Giá thuê: 6 triệu/tháng. Căn hộ mặt tiền Tôn Đức Thắng","evidence_source_id":"TEST_ONLY-source","evidence_claim":"TEST_ONLY source claim","evidence_rights":"PERSONAL"},[],supplied_key="TEST_ONLY-intake-evidence-save-001")
       assert saved["preliminaryFacts"]["price_vnd_per_month"]==6000000 and saved["preliminaryFacts"]["price_cycle"]=="MONTH"
-      assert saved["ownerEvidence"]=={"source_id":"TEST_ONLY-source","claim":"TEST_ONLY source claim","rights_status":"PERSONAL"}
+      assert saved["ownerEvidence"]["source_id"].startswith("intake:") and saved["ownerEvidence"]["rights_status"]=="PERSONAL"
+      assert "Giá thuê" in saved["ownerEvidence"]["claim"]
       replayed,is_replay,_=admin.create_intake_record({"source":"Cá nhân","note":"different replay body","evidence_source_id":"TEST_ONLY-other","evidence_claim":"TEST_ONLY other","evidence_rights":"COMPANY"},[],supplied_key="TEST_ONLY-intake-evidence-save-001")
       assert is_replay and replayed["id"]==saved["id"] and replayed["ownerEvidence"]==saved["ownerEvidence"]
     store=PropertyStore(private/"store.sqlite3"); noop=Noop()
@@ -82,7 +83,7 @@ def main():
       assert body["generation"]["estimated_cost_usd"]=="0.0001"
       assert len(usage.rows[0]["usage"])==3 and usage.rows[0]["review_id"]==pkg["review_id"]
       denied_rights=call(handler,missing["id"],"TEST_ONLY-no-rights-key-001")
-      assert denied_rights["status"]==409 and denied_rights["value"]["missing_evidence"]==["source_id","claim","rights_status"]
+      assert denied_rights["status"]==409 and denied_rights["value"]["missing_evidence"]==["rights_status"]
       assert denied_rights["value"]["provider_calls"]==0 and denied_rights["value"]["intake_id"]==missing["id"]
       assert provider.calls==1 and len(usage.rows)==1
       again=call(handler,intake["id"],"TEST_ONLY-idempotency-key-001")

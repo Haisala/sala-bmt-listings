@@ -22,6 +22,7 @@ import sqlite3
 import threading
 import tempfile
 import unicodedata
+from copy import deepcopy
 from collections import deque
 import uuid
 import fcntl
@@ -57,6 +58,7 @@ from property_memory.runtime_lock import validate_runtime_lock
 from property_memory.store import PropertyStore
 from property_memory.usage_ledger import UsageLedger
 from property_memory.analytics_store import AnalyticsStore, AnalyticsValidationError, EVENT_TYPES
+from property_memory.source_prefill import extract_source_facts
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_ROOT = Path(os.environ.get("BMT_ADMIN_PRIVATE_ROOT", "/Users/trandinhhieu/BMTPropertyHubPrivate"))
@@ -925,51 +927,69 @@ def deduplicate_same_batch_images(files: list[tuple[str, bytes]]) -> tuple[list[
 
 
 def extract_preliminary_facts(note: str) -> dict[str, Any]:
-    """Extract only narrow, literal patterns from Owner source text; never infer a title or legal status."""
-    text = str(note or "")
-    normalized = unicodedata.normalize("NFKD", text.casefold().replace("đ", "d"))
-    folded = "".join(char for char in normalized if not unicodedata.combining(char))
-    facts: dict[str, Any] = {}
-    if re.search(r"\b(cho thue|thue|rent|rental)\b", folded):
-        facts["transaction_type"] = "RENT"
-    elif re.search(r"\b(ban|sale)\b", folded):
-        facts["transaction_type"] = "SALE"
-    if re.search(r"can ho|apartment", folded):
-        facts["property_type"] = "APARTMENT"
-    elif re.search(r"biet thu|nha pho|nha rieng|nha cap", folded):
-        facts["property_type"] = "HOUSE"
-    elif re.search(r"\bdat\b", folded):
-        facts["property_type"] = "LAND"
-    if "biet thu" in folded:
-        facts["house_type"] = "BIET_THU"
-    elif "nha pho" in folded:
-        facts["house_type"] = "NHA_PHO"
-    area = re.search(r"(?<!\w)(\d+(?:[.,]\d+)?)\s*(?:m²|m2|sqm|met vuong)(?:\b|(?=\s|$))", folded)
-    if area:
-        facts["area"] = area.group(1).replace(",", ".") + " m²"
-    amount = re.search(r"(?:gia\s*(?:thue|ban)?\s*[:=]?\s*)?(\d+(?:[.,]\d+)?)\s*(ty|ti|trieu|tr|nghin|ngan)\b", folded)
-    if amount:
-        value = float(amount.group(1).replace(",", "."))
-        unit = amount.group(2)
-        multiplier = 1_000_000_000 if unit in {"ty", "ti"} else 1_000_000 if unit in {"trieu", "tr"} else 1_000
-        amount_vnd = int(value * multiplier)
-        transaction = facts.get("transaction_type")
-        if transaction == "RENT" or re.search(r"/\s*thang|moi\s*thang|per\s*month", folded):
-            facts["transaction_type"] = "RENT"
-            facts["price_vnd_per_month"] = amount_vnd
-            facts["price_cycle"] = "MONTH"
-        elif transaction == "SALE":
-            facts["price_vnd"] = amount_vnd
-    address = re.search(r"(?:mat tien|duong|dia chi|tai khu vuc)\s+([^,;.!\n]+)", folded)
-    if address:
-        # Preserve source spelling by using the corresponding slice from the original string.
-        start = address.start(1)
-        facts["address"] = text[start:start + len(address.group(1))].strip()
-    for name, pattern in (("bedrooms", r"(\d+)\s*(?:phong ngu|bedrooms?)"), ("bathrooms", r"(\d+)\s*(?:wc|phong tam|bathrooms?)")):
-        match = re.search(pattern, folded)
-        if match:
-            facts[name] = int(match.group(1))
-    return facts
+    """Compatibility wrapper; values remain unconfirmed source candidates."""
+    return extract_source_facts(note).get("facts", {})
+
+
+def project_intake_prefill(record: dict[str, Any]) -> dict[str, Any]:
+    """Build an in-memory same-Intake read model; never writes on GET."""
+    item = deepcopy(record)
+    intake_id = str(item.get("id") or item.get("intake_id") or "")
+    source_revision = max(1, int(item.get("sourceNoteRevision", 1) or 1))
+    parsed = extract_source_facts(str(item.get("note") or ""), intake_id=intake_id,
+                                  source_revision=source_revision)
+    parsed_facts = parsed["facts"]
+    stored = item.get("preliminaryFacts") if isinstance(item.get("preliminaryFacts"), dict) else {}
+    owner = item.get("ownerFacts") if isinstance(item.get("ownerFacts"), dict) else {}
+    resolved = item.get("resolvedSourceConflicts") if isinstance(item.get("resolvedSourceConflicts"), dict) else {}
+    facts = dict(parsed_facts)
+    conflicts = list(parsed.get("conflicts", []))
+    for field, value in stored.items():
+        if value in (None, ""):
+            continue
+        if field not in facts:
+            facts[field] = value
+        elif str(facts[field]) != str(value) and field not in owner:
+            conflicts.append({"field": field, "kind": "SAVED_VALUE_DIFFERS_FROM_SOURCE",
+                              "current_value": value, "source_value": facts[field],
+                              "evidence": parsed.get("provenance", {}).get(field, {}).get("evidence_excerpt", "")})
+    for field, value in owner.items():
+        if value in (None, ""):
+            continue
+        resolution = resolved.get(field)
+        if field in parsed_facts and str(parsed_facts[field]) != str(value) and not (
+                isinstance(resolution, dict) and str(resolution.get("value")) == str(value)):
+            conflicts.append({"field": field, "kind": "OWNER_VALUE_DIFFERS_FROM_SOURCE",
+                              "current_value": value, "source_value": parsed_facts[field],
+                              "evidence": parsed.get("provenance", {}).get(field, {}).get("evidence_excerpt", "")})
+        facts[field] = value
+    for field, resolution in resolved.items():
+        if isinstance(resolution, dict) and str(facts.get(field)) == str(resolution.get("value")):
+            conflicts = [conflict for conflict in conflicts if conflict.get("field") != field]
+    # Keep pre-existing explicit conflicts unless the Owner resolved that field.
+    for conflict in item.get("conflicts", []) if isinstance(item.get("conflicts"), list) else []:
+        if isinstance(conflict, dict) and conflict.get("field") not in resolved:
+            conflicts.append(conflict)
+    evidence = item.get("ownerEvidence") if isinstance(item.get("ownerEvidence"), dict) else {}
+    generated_source_id = parsed.get("source_id") or f"intake:{intake_id}:source:r{source_revision}"
+    note = str(item.get("note") or "")
+    system_claim = note[:1200].strip() or f"Original source record for Intake {intake_id}, revision {source_revision}."
+    prior_source_id = evidence.get("source_id")
+    source_id = str(prior_source_id).strip() if isinstance(prior_source_id, str) and 0 < len(prior_source_id.strip()) <= 160 else generated_source_id
+    prior_claim = evidence.get("claim")
+    claim = str(prior_claim).strip() if isinstance(prior_claim, str) and 0 < len(prior_claim.strip()) <= 1200 else system_claim
+    evidence = {**evidence, "source_id": source_id, "claim": claim,
+                "rights_status": evidence.get("rights_status") or ""}
+    provenance = dict(parsed.get("provenance", {}))
+    for field in owner:
+        provenance[field] = {"intake_id": intake_id, "source_id": source_id,
+                             "source_revision": source_revision, "origin": "OWNER_PROVIDED"}
+    item["preliminaryFacts"] = facts
+    item["ownerEvidence"] = evidence
+    item["factProvenance"] = provenance
+    item["sourcePrefillVersion"] = 1
+    item["conflicts"] = conflicts
+    return item
 
 
 def validate_evidence_payload(value: Any) -> dict[str, Any]:
@@ -994,6 +1014,7 @@ def validate_evidence_payload(value: Any) -> dict[str, Any]:
 
 
 def intake_content_readiness(record: dict[str, Any]) -> tuple[list[str], list[str]]:
+    record = project_intake_prefill(record)
     candidate = to_candidate(record)
     facts = candidate.get("facts") or {}
     missing: list[str] = []
@@ -1020,10 +1041,12 @@ def intake_content_readiness(record: dict[str, Any]) -> tuple[list[str], list[st
         for key in ("house_type", "bedrooms", "bathrooms"):
             if facts.get(key) in (None, ""):
                 missing.append(key)
+    missing.extend(str(item.get("field")) for item in record.get("conflicts", [])
+                   if isinstance(item, dict) and item.get("field"))
     evidence = record.get("ownerEvidence") if isinstance(record.get("ownerEvidence"), dict) else {}
-    missing_evidence = [key for key in ("source_id", "claim", "rights_status") if not str(evidence.get(key) or "").strip()]
-    if evidence.get("rights_status") not in {"PERSONAL", "COMPANY", "APPROVED"} and "rights_status" not in missing_evidence:
-        missing_evidence.append("rights_status")
+    # Source IDs and source claims come from the saved Intake; only use rights
+    # after the Owner explicitly confirms them.
+    missing_evidence = [] if evidence.get("rights_status") in {"PERSONAL", "COMPANY", "APPROVED"} else ["rights_status"]
     return list(dict.fromkeys(missing)), missing_evidence
 
 
@@ -1090,11 +1113,9 @@ def create_intake_record(fields: dict[str, str], files: list[tuple[str, bytes]],
                 target.chmod(0o600)
                 digest = media_sha256(content)
                 media.append({"mediaId": media_identity(digest), "filename": filename, "storedFilename": stored_filename, "path": str((folder / stored_filename).relative_to(PRIVATE_ROOT)), "bytes": len(content), "sha256": digest})
-            owner_evidence = {"source_id": fields.get("evidence_source_id", "").strip(),
-                              "claim": fields.get("evidence_claim", "").strip(),
-                              "rights_status": fields.get("evidence_rights", "").strip()}
-            owner_evidence = owner_evidence if any(owner_evidence.values()) else None
-            record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "inputRevision": 1, "status": "RECEIVED", "note": fields.get("note", ""), "ownerEvidence": owner_evidence, "ownerEvidenceRevision": 1 if owner_evidence else 0, "preliminaryFacts": extract_preliminary_facts(fields.get("note", "")), "ownerFacts": {}, "ownerFactsRevision": 0, "media": media, "missingFields": [], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
+            owner_evidence = {"rights_status": fields.get("evidence_rights", "").strip()}
+            record = {"id": intake_id, "operationId": operation_id, "idempotencyKey": idempotency_key, "clientBatchId": client_batch_id, "source": fields.get("source", "Cá nhân"), "sourceGroup": fields.get("sourceGroup", ""), "sourceDate": now_iso(), "createdAt": now_iso(), "updatedAt": now_iso(), "inputRevision": 1, "sourceNoteRevision": 1, "status": "RECEIVED", "note": fields.get("note", ""), "ownerEvidence": owner_evidence, "ownerEvidenceRevision": 0, "preliminaryFacts": {}, "ownerFacts": {}, "ownerFactsRevision": 0, "media": media, "missingFields": [], "conflicts": [], "draft": None, "channelApprovals": {c: False for c in CHANNELS}}
+            record = project_intake_prefill(record)
             (staging / "metadata.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             (staging / "metadata.json").chmod(0o600)
             if failure: failure("before_folder_commit")
@@ -1631,17 +1652,13 @@ class Handler(BaseHTTPRequestHandler):
         if record is None:
             self.send_json({"error": "INTAKE_NOT_FOUND", "published": False}, 404)
             return
+        record = project_intake_prefill(record)
         if (not test_only and
                 (record.get("source") == "TEST_ONLY" or any("TEST_ONLY" in str(record.get(k, "")) for k in ("sourceGroup", "note", "clientBatchId")))):
             self.send_json({"error": "TEST_ONLY_INTAKE_BLOCKED", "published": False}, 403)
             return
         missing_fields, missing_evidence = intake_content_readiness(record)
         candidate_preview = to_candidate(record)
-        if candidate_preview.get("conflicts"):
-            self.send_json({"error": "CONTENT_SOURCE_CONFLICT", "intake_id": intake_id,
-                            "conflicts": candidate_preview["conflicts"], "provider_calls": 0,
-                            "published": False}, 409)
-            return
         stored_evidence = record.get("ownerEvidence") if isinstance(record.get("ownerEvidence"), dict) else None
         bound_evidence = None
         if stored_evidence and not missing_evidence:
@@ -1657,9 +1674,10 @@ class Handler(BaseHTTPRequestHandler):
                             "provider_calls": 0, "published": False}, 409)
             return
         requested_evidence = bound_evidence
-        if missing_fields or missing_evidence:
+        if missing_fields or missing_evidence or candidate_preview.get("conflicts"):
             self.send_json({"error": "CONTENT_PREREQUISITES_REQUIRED", "intake_id": intake_id,
                             "missing_fields": missing_fields, "missing_evidence": missing_evidence,
+                            "conflicts": candidate_preview.get("conflicts", []),
                             "suggested_facts": record.get("preliminaryFacts", {}),
                             "input_revision": int(record.get("inputRevision", 1)),
                             "provider_calls": 0, "published": False}, 409)
@@ -2241,7 +2259,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/website":
             if not self.require_auth():
                 return
-            body = WEBSITE_MASTER_PAGE
+            body = WEBSITE_MASTER_PAGE.replace(
+                '<div id="traffic-data" class="empty">Đang tải…</div>'.encode("utf-8"),
+                ('<div id="traffic-data" class="empty">Đang tải…</div>'.encode("utf-8") + ANALYTICS_CARD), 1)
+            body = body.replace(b"</body>", ANALYTICS_UI + b"</body>", 1)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -2278,8 +2299,7 @@ class Handler(BaseHTTPRequestHandler):
             body = body.replace(b"<main>", b"<main>" + HOME_HTML.encode("utf-8"), 1)
             body = body.replace(b'<section class="card"><p class="kicker">QUEUE</p>', b'<section id="queue-section" class="card"><p class="kicker">QUEUE</p>', 1)
             body = body.replace(b"</main><script>", MISSING_FIELDS_MARKUP.encode("utf-8") + b"</main><script>", 1)
-            body = body.replace(b"</main><script>", ANALYTICS_CARD + b"</main><script>", 1)
-            body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + ANALYTICS_UI + b'</body></html>', 1)
+            body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + b'</body></html>', 1)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -2295,7 +2315,33 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/analytics/report":
             self.analytics_report()
         elif path == "/api/intakes":
-            self.send_json(load_index())
+            self.send_json([project_intake_prefill(item) for item in load_index()])
+        elif (intake_media_match := re.fullmatch(r"/api/intakes/([^/]+)/media/(media-[a-f0-9]{24})", path)):
+            intake_id, media_id = intake_media_match.groups()
+            record = next((item for item in load_index() if item.get("id") == intake_id), None)
+            media = next((item for item in (record or {}).get("media", []) if item.get("mediaId") == media_id), None)
+            if not record or not media:
+                self.send_json({"error": "INTAKE_MEDIA_NOT_FOUND"}, 404)
+                return
+            try:
+                asset = (PRIVATE_ROOT / str(media.get("path") or "")).resolve(strict=True)
+                asset.relative_to(INBOX_ROOT.resolve())
+                if not asset.is_file() or asset.stat().st_size > 20 * 1024 * 1024:
+                    raise ValueError("INTAKE_MEDIA_INVALID")
+                content_type = mimetypes.guess_type(asset.name)[0] or "application/octet-stream"
+                if content_type not in {"image/jpeg", "image/png", "image/webp", "image/avif"}:
+                    self.send_json({"error": "INTAKE_MEDIA_NOT_FOUND"}, 404)
+                    return
+                data = asset.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+            except (OSError, ValueError):
+                self.send_json({"error": "INTAKE_MEDIA_NOT_FOUND"}, 404)
         elif path == "/api/audit":
             try:
                 lines = AUDIT_LOG_PATH.read_text(encoding="utf-8").splitlines()
@@ -2667,6 +2713,11 @@ class Handler(BaseHTTPRequestHandler):
             if not record:
                 self.send_json({"error": "Không tìm thấy intake."}, 404)
                 return
+            record = project_intake_prefill(record)
+            if record.get("conflicts"):
+                self.send_json({"error": "INTAKE_SOURCE_CONFLICT", "conflicts": record["conflicts"],
+                                "provider_calls": 0}, 409)
+                return
             try:
                 with PROPERTY_OPERATION_LOCK:
                     package = process_intake(center.store, center, record, ai_gateway=AI_GATEWAY, operation_id=record["id"])
@@ -2681,9 +2732,10 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self.send_json({"error": "JSON draft không hợp lệ."}, 400)
                 return
-            items = load_index(); record = next((x for x in items if x.get("id") == draft_match.group(1)), None)
-            if not record:
+            items = load_index(); record_index = next((i for i, x in enumerate(items) if x.get("id") == draft_match.group(1)), None)
+            if record_index is None:
                 self.send_json({"error": "Không tìm thấy intake."}, 404); return
+            record = project_intake_prefill(items[record_index])
             current_revision = int(record.get("inputRevision", 1))
             expected_revision = payload.get("expected_input_revision")
             if expected_revision is not None and expected_revision != current_revision:
@@ -2702,15 +2754,18 @@ class Handler(BaseHTTPRequestHandler):
                 record["preliminaryFacts"] = facts
                 record["ownerFacts"] = {**(record.get("ownerFacts") or {}), **incoming_facts}
                 record["ownerFactsRevision"] = int(record.get("ownerFactsRevision", 0)) + 1
+                resolved = dict(record.get("resolvedSourceConflicts") or {})
+                for key, value in incoming_facts.items():
+                    if any(item.get("field") == key for item in record.get("conflicts", []) if isinstance(item, dict)):
+                        resolved[key] = {"value": value, "resolution": "OWNER_CONFIRMED", "source_revision": int(record.get("sourceNoteRevision", 1))}
+                record["resolvedSourceConflicts"] = resolved
             incoming_evidence = payload.get("evidence")
             if incoming_evidence is not None:
                 if not isinstance(incoming_evidence, dict):
                     self.send_json({"error": "CONTENT_EVIDENCE_INVALID"}, 400); return
-                evidence = {"source_id": str(incoming_evidence.get("source_id") or "").strip(),
-                            "claim": str(incoming_evidence.get("claim") or "").strip(),
+                evidence = {**(record.get("ownerEvidence") or {}),
                             "rights_status": str(incoming_evidence.get("rights_status") or "").strip().upper()}
-                if (len(evidence["source_id"]) > 160 or len(evidence["claim"]) > 1200
-                        or evidence["rights_status"] not in {"", "PERSONAL", "COMPANY", "APPROVED"}):
+                if evidence["rights_status"] not in {"", "PERSONAL", "COMPANY", "APPROVED"}:
                     self.send_json({"error": "CONTENT_EVIDENCE_INVALID"}, 400); return
                 if evidence != record.get("ownerEvidence"):
                     record["ownerEvidence"] = evidence if any(evidence.values()) else None
@@ -2720,6 +2775,8 @@ class Handler(BaseHTTPRequestHandler):
                      "ownerFactsRevision": int(record.get("ownerFactsRevision", 0)),
                      "createdAt": (record.get("draft") or {}).get("createdAt", now), "updatedAt": now}
             record["draft"] = draft; record["status"] = "DRAFT_NEEDS_REVIEW"; record["inputRevision"] = current_revision + 1; record["updatedAt"] = now
+            record["sourcePrefillVersion"] = 1
+            items[record_index] = record
             save_index(items)
             folder = INBOX_ROOT / record["id"]
             if folder.is_dir() and folder.parent == INBOX_ROOT:
