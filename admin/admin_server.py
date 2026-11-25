@@ -49,8 +49,10 @@ from property_memory.ai9_layers import OWNER_CONFIRMED_TEST_COMMENT, OWNER_CONFI
 from property_memory.content_studio import build_copy_studio_preview, build_generative_internal_draft, build_generative_content_batch, GENERATIVE_MODE
 try:
     from .one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP, OWNER_NAV_HTML
+    from .intake_workflow_ui import INTAKE_WORKFLOW_CSS, INTAKE_WORKFLOW_SCRIPT
 except ImportError:  # Running admin_server.py as the service entrypoint.
     from one_touch_ui import HOME_CSS, HOME_HTML, HOME_SCRIPT, MISSING_FIELDS_MARKUP, OWNER_NAV_HTML
+    from intake_workflow_ui import INTAKE_WORKFLOW_CSS, INTAKE_WORKFLOW_SCRIPT
 from property_memory.evidence import validate_evidence_payload
 from property_memory.keychain import CredentialError, resolve_openai_key
 from property_memory.runtime_config import diagnostic_payload, health_payload, load_runtime_config
@@ -58,7 +60,7 @@ from property_memory.runtime_lock import validate_runtime_lock
 from property_memory.store import PropertyStore
 from property_memory.usage_ledger import UsageLedger
 from property_memory.analytics_store import AnalyticsStore, AnalyticsValidationError, EVENT_TYPES
-from property_memory.source_prefill import extract_source_facts
+from property_memory.source_prefill import extract_source_facts, is_placeholder_location
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_ROOT = Path(os.environ.get("BMT_ADMIN_PRIVATE_ROOT", "/Users/trandinhhieu/BMTPropertyHubPrivate"))
@@ -1170,6 +1172,10 @@ def project_intake_prefill(record: dict[str, Any]) -> dict[str, Any]:
                               "current_value": value, "source_value": parsed_facts[field],
                               "evidence": parsed.get("provenance", {}).get(field, {}).get("evidence_excerpt", "")})
         facts[field] = value
+    invalid_prefill_fields: list[str] = []
+    if facts.get("address") not in (None, "") and is_placeholder_location(facts.get("address")):
+        facts.pop("address", None)
+        invalid_prefill_fields.append("address")
     for field, resolution in resolved.items():
         if isinstance(resolution, dict) and str(facts.get(field)) == str(resolution.get("value")):
             conflicts = [conflict for conflict in conflicts if conflict.get("field") != field]
@@ -1237,15 +1243,49 @@ def project_intake_prefill(record: dict[str, Any]) -> dict[str, Any]:
                 "rights_status": evidence.get("rights_status") or ""}
     provenance = dict(parsed.get("provenance", {}))
     provenance.update(bound_price_provenance)
+    for field in invalid_prefill_fields:
+        provenance.pop(field, None)
     for field in owner:
         provenance[field] = {"intake_id": intake_id, "source_id": source_id,
                              "source_revision": source_revision, "origin": "OWNER_PROVIDED"}
     item["preliminaryFacts"] = facts
     item["ownerEvidence"] = evidence
     item["factProvenance"] = provenance
+    item["invalidPrefillFields"] = invalid_prefill_fields
     item["priceCandidates"] = price_candidates
     item["sourcePrefillVersion"] = 1
     item["conflicts"] = conflicts
+    return item
+
+
+def project_intake_admin_list_item(record: dict[str, Any], center: ReviewCenter | None) -> dict[str, Any]:
+    """Add safe same-Intake recovery metadata to the authenticated Admin list."""
+    item = project_intake_prefill(record)
+    if center is None:
+        return item
+    intake_id = str(item.get("id") or "")
+    for package in center.packages.values():
+        candidate = package.get("candidate") or {}
+        if str(candidate.get("intake_id") or "") != intake_id:
+            continue
+        item["contentReviewId"] = package.get("review_id")
+        batches = package.get("content_batches") if isinstance(package.get("content_batches"), list) else []
+        item["contentBatchCount"] = len(batches)
+        requests = package.get("content_generation_requests")
+        latest = requests[-1] if isinstance(requests, list) and requests else None
+        if latest:
+            response = latest.get("response") if isinstance(latest.get("response"), dict) else {}
+            try:
+                provider_calls = int(response.get("provider_calls") or 0)
+            except (TypeError, ValueError):
+                provider_calls = 0
+            if latest.get("status") == "IN_PROGRESS" or provider_calls > 0:
+                item["contentAttemptState"] = "OUTCOME_UNVERIFIED"
+            elif latest.get("status") == "SUCCEEDED":
+                item["contentAttemptState"] = "SUCCEEDED"
+            elif latest.get("status") == "BLOCKED":
+                item["contentAttemptState"] = "BLOCKED_NO_PROVIDER"
+        break
     return item
 
 
@@ -1436,7 +1476,7 @@ CONTENT_STUDIO_UI = '''<script>
     if(!host)return;
     host.querySelector('#content-studio')?.remove();host.querySelector('#review-evidence')?.remove();
     const response=await fetch('/api/reviews/'+encodeURIComponent(id),{credentials:'same-origin',cache:'no-store'});
-    const pkg=await response.json();if(!response.ok)return;
+    const pkg=await response.json();if(!response.ok)return;window.currentReviewPackage=pkg;
     const panel=document.createElement('section');panel.className='item';panel.id='content-studio';
     panel.innerHTML='<h4>Content Studio · riêng tư</h4><p class="muted">Mỗi lần Tạo Content tạo đúng 5 bản trong một batch. Facts, nguồn và revision được liên kết; ảnh chưa gửi cho AI. Gate A, Gate B và đăng Website là các quyết định riêng.</p><p data-message role="status"></p><div data-variants></div>';
     host.append(panel);const message=panel.querySelector('[data-message]'),cards=panel.querySelector('[data-variants]');
@@ -1454,7 +1494,7 @@ CONTENT_STUDIO_UI = '''<script>
       head.textContent=`${batch.status||'PRIVATE_DRAFT'} · ${batch.content_batch_id} · facts ${batch.facts_revision_id} · ${g.model||''} · ${u.input_tokens??'—'}/${u.output_tokens??'—'} tokens · ${g.request_id||'—'} · est. ${g.estimated_cost_usd??'—'} USD · media ${batch.media_analysis||'NOT_SENT'}`;cards.append(head);
       if((batch.normalized_facts||[]).length){const f=document.createElement('p');f.className='muted';f.textContent='Facts trích từ nguồn (chưa Owner xác nhận): '+batch.normalized_facts.map(x=>x.field+'='+x.normalized_value+' ['+x.evidence+']').join(' · ');cards.append(f)}
       for(const variant of(batch.variants||[])){
-        const card=document.createElement('article');card.className='item';card.innerHTML='<b></b><label>Tiêu đề</label><input data-title><label>Nội dung</label><textarea data-body rows="5"></textarea><button type="button" data-edit>Lưu chỉnh sửa</button><button type="button" data-select class="secondary">Chọn mẫu</button><div data-channels></div><p data-status class="muted"></p>';
+        const card=document.createElement('article');card.className='item';card.dataset.variantId=variant.content_variant_id;card.dataset.selected=String(pkg.selected_content_variant_id===variant.content_variant_id);card.innerHTML='<b></b><label>Tiêu đề</label><input data-title><label>Nội dung</label><textarea data-body rows="5"></textarea><button type="button" data-edit>Lưu chỉnh sửa</button><button type="button" data-select class="secondary">Chọn mẫu</button><div data-channels></div><p data-status class="muted"></p>';
         card.querySelector('b').textContent=(variant.status||'DRAFT')+' · '+variant.content_variant_id+' · revision '+variant.content_revision;
         card.querySelector('[data-title]').value=variant.title||'';card.querySelector('[data-body]').value=variant.body||'';
         const base={content_variant_id:variant.content_variant_id,expected_content_revision:variant.content_revision};
@@ -1481,7 +1521,7 @@ async function loadReviews(){const r=await fetch('/api/reviews');const d=await r
 async function loadReview(id){const r=await fetch('/api/reviews/'+encodeURIComponent(id));const x=await r.json();if(!r.ok){$('#review-detail').textContent=x.error;return}const ia=x.internal_analysis||{},ds=ia.deal_score||{};$('#review-detail').innerHTML=`<div class="item"><h3>${esc(x.state)} · revision ${x.review_revision}</h3><h4>Nguồn / provenance</h4><pre>${esc(JSON.stringify(x.candidate?.raw||x.candidate?.provenance||{},null,2))}</pre><h4>Property facts</h4><pre>${esc(JSON.stringify(x.candidate?.facts||{},null,2))}</pre><h4>Thiếu / chưa Owner xác nhận</h4><pre>${esc(JSON.stringify(x.candidate?.missing_fields||[],null,2))}</pre><h4>Market / Comparable / Valuation</h4><pre>${esc(JSON.stringify({snapshot:x.market_snapshot?.market_snapshot_id,comparables:x.comparable_set?.status,valuation:x.valuation?.valuation_summary||x.valuation},null,2))}</pre><h4>AI Internal Analysis · PRIVATE</h4><pre>${esc(JSON.stringify({score:ds, strengths:ia.strengths, risks:ia.weaknesses_risks, anomalies:ia.anomalies, missing:ia.missing_information, questions:ia.questions_to_verify, recommendation:ia.recommended_action, confidence:ia.confidence},null,2))}</pre><p class="err">${x.state==='STALE_REVIEW'?'Phân tích đã cũ; không thể duyệt.':''}</p><label>Sửa field</label><input id="review-field" placeholder="ví dụ transaction_type, price_vnd_per_month, house_type, bedrooms"><input id="review-value" placeholder="Giá trị mới"><button data-edit-review>SAVE REVIEW REVISION</button> <button data-approve-review ${x.state==='STALE_REVIEW'||x.state==='REJECTED'?'disabled':''}>DUYỆT GATE A</button> <button data-reject-review>BỎ / TỪ CHỐI</button><p id="review-msg"></p></div>`;document.querySelector('[data-edit-review]').onclick=()=>reviewAction(id,'edit',x.review_revision,{field:$('#review-field').value,value:$('#review-value').value,owner_id:'owner'});document.querySelector('[data-approve-review]').onclick=()=>reviewAction(id,'approve',x.review_revision,{decision:'CREATE_NEW_PROPERTY',idempotency_key:'ui:'+id+':'+x.review_revision,owner_id:'owner'});document.querySelector('[data-reject-review]').onclick=()=>reviewAction(id,'reject',x.review_revision,{reason:'Owner rejected',owner_id:'owner'})}
 async function reviewAction(id,kind,revision,extra){const r=await fetch('/api/reviews/'+id+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:revision,...extra})});const d=await r.json();const gateErrors={MISSING_FIELDS_REQUIRE_OWNER:'Cần Owner bổ sung/xác nhận trường bắt buộc theo loại BĐS.',PROPERTY_TYPE_UNSUPPORTED:'Loại BĐS chưa có quy tắc Gate A.',RENT_PERIOD_NOT_SUPPORTED_BY_PROPERTY_CORE:'Property Core hiện chỉ lưu được giá thuê theo tháng; kỳ hạn này chưa thể duyệt.',SALE_PRICE_PERIOD_INVALID:'Giá bán không nhận chu kỳ thuê.'};$('#review-msg').textContent=r.ok?'Đã cập nhật: '+(d.state||'OK'):(gateErrors[d.error]||d.error||'Lỗi');loadReviews();if(r.ok)loadReview(id)}
 async function load(){const r=await fetch('/api/intakes',{credentials:'same-origin',cache:'no-store'});const rows=await r.json();if(!r.ok){$('#queue').textContent=rows.error||'Không tải được Intake';return}window.intakeRecords=rows;const host=$('#queue');host.replaceChildren();const isTestOnly=x=>x.source==='TEST_ONLY'||[x.sourceGroup,x.note,x.clientBatchId].some(v=>String(v||'').includes('TEST_ONLY'));const hidden=rows.filter(isTestOnly).length;const visible=rows.filter(x=>!isTestOnly(x));if(hidden){const note=document.createElement('p');note.className='muted';note.textContent=hidden+' intake TEST_ONLY được ẩn khỏi hàng đợi vận hành; dữ liệu chưa bị xóa.';host.append(note)}if(!visible.length){const empty=document.createElement('p');empty.textContent='Chưa có intake cần xử lý.';host.append(empty);return}for(const x of visible){const row=document.createElement('article');row.className='item';row.dataset.intakeId=x.id;const title=document.createElement('b');title.textContent=x.id;const state=document.createElement('span');state.className='status';state.textContent=x.status||'RECEIVED';const detail=document.createElement('div');detail.textContent=(x.source||'')+' · '+(x.createdAt||'');const note=document.createElement('div');note.className='muted';note.textContent=(x.media||[]).length+' media · '+(x.note||'Không có ghi chú');row.append(title,document.createTextNode(' '),state,detail,note);if(['RECEIVED','DRAFT_NEEDS_REVIEW'].includes(x.status||'RECEIVED')){const action=document.createElement('button');action.type='button';action.textContent='TIẾP TỤC XỬ LÝ';action.onclick=()=>createContent(x.id,action);row.append(action)}else if(x.status==='CONTENT_CREATED'&&x.contentReviewId){const action=document.createElement('button');action.type='button';action.textContent='XEM 5 CONTENT';action.onclick=async()=>{window.navigateAdminScreen?.('content',{intakeId:x.id,reviewId:x.contentReviewId});await loadReviews();await window.loadReview(x.contentReviewId)};row.append(action)}const msg=document.createElement('p');msg.setAttribute('data-intake-action-status','');msg.setAttribute('role','status');row.append(msg);host.append(row)}}
-const intakeForm=$('#intake'),mediaInput=$('#intake-media-input'),addMedia=$('#intake-add-media'),mediaCount=$('#intake-media-count'),mediaList=$('#intake-media-list'),previewDialog=$('#intake-preview'),previewImage=$('#intake-preview-image'),previewClose=$('#intake-preview-close'),saveIntake=$('#intake-save'),newIntake=$('#intake-new');let intakeFiles=[],intakeBusy=false,intakeScanGeneration=0;let pendingSavedIntakeId=null;newIntake.onclick=()=>{if(!pendingSavedIntakeId)return;intakeForm.reset();pendingSavedIntakeId=null;newIntake.hidden=true;intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)});intakeFiles=[];renderIntakeFiles();$('#intake-msg').textContent='Nguồn Intake trước đã lưu trong Queue.'};const contentRequestsInFlight=new Set();function contentRequestKey(keyName){let key;try{key=localStorage.getItem(keyName)||sessionStorage.getItem(keyName);if(!key)key=crypto.randomUUID().replace(/-/g,'');localStorage.setItem(keyName,key);sessionStorage.setItem(keyName,key);if(localStorage.getItem(keyName)!==key)throw Error('storage verification failed');return key}catch(_){throw Error('CONTENT_IDEMPOTENCY_STORAGE_UNAVAILABLE')}}function clearContentRequestKey(keyName){try{localStorage.removeItem(keyName)}catch(_){}try{sessionStorage.removeItem(keyName)}catch(_){}}async function createContent(intakeId,button,externalConsent=false,sourceMediaRightsConfirmed=false){if(contentRequestsInFlight.has(intakeId))return false;contentRequestsInFlight.add(intakeId);if(button)button.disabled=true;const statusNode=button?.closest('article')?.querySelector('[data-intake-action-status]')||$('#intake-msg');statusNode.className='muted';statusNode.textContent='Đang kiểm tra Intake, dữ kiện và quyền nguồn…';const keyName='sala-content-idem:'+intakeId;let key,requestStarted=false,timeoutId;try{key=contentRequestKey(keyName);const controller=new AbortController();timeoutId=window.setTimeout(()=>controller.abort(),90000);statusNode.textContent='Đang gửi yêu cầu; chờ máy chủ xác minh điều kiện và trạng thái…';const request=fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/create-content',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({idempotency_key:key,external_text_processing_consent:externalConsent===true,source_media_rights_confirmed:sourceMediaRightsConfirmed===true}),signal:controller.signal});requestStarted=true;const r=await request;let d;try{d=await r.json()}catch(_){throw Error('Máy chủ trả phản hồi không hợp lệ; giữ khóa chống lặp để không gửi lại tự động.')}if(r.status!==201&&r.status!==200){if(r.status<500&&d.error!=='CONTENT_REQUEST_OUTCOME_UNKNOWN'&&d.provider_calls===0)clearContentRequestKey(keyName);if(['CONTENT_PREREQUISITES_REQUIRED','CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED','CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED'].includes(d.error)&&window.openMissingFields){await load();const record=(window.intakeRecords||[]).find(x=>x.id===intakeId);window.openMissingFields(intakeId,d,record)}else{statusNode.className='err';statusNode.textContent=(d.error||'CONTENT_CREATE_FAILED')+(d.provider_calls===0?' · Chưa gọi AI.':'')+' · Intake đã lưu: '+intakeId+'.';await load();if(d.review_id){await loadReviews();await window.loadReview(d.review_id)}}return false}clearContentRequestKey(keyName);statusNode.className='ok';statusNode.textContent='Đã tạo 5 Content riêng tư · '+d.review_id+' · '+d.content_batch_id+' · chưa duyệt, chưa đăng.';await load();await loadReviews();await window.loadReview(d.review_id);return true}catch(e){statusNode.className='err';if(!requestStarted){clearContentRequestKey(keyName);statusNode.textContent='Chưa gửi yêu cầu: không lưu được khóa chống lặp trên thiết bị. Hãy thử lại khi bộ nhớ trình duyệt hoạt động · Intake đã lưu: '+intakeId+'.'}else{const timedOut=e?.name==='AbortError';statusNode.textContent=(timedOut?'Quá 90 giây chưa có phản hồi.':'Mất kết nối trước khi xác nhận kết quả.')+' Kết quả chưa rõ; mã chống trùng được giữ. Không tạo Intake mới hoặc gửi yêu cầu khác; mở lại đúng Intake để đối soát · '+intakeId+'.'}await load();return false}finally{if(timeoutId)window.clearTimeout(timeoutId);contentRequestsInFlight.delete(intakeId);if(button)button.disabled=false}}
+const intakeForm=$('#intake'),mediaInput=$('#intake-media-input'),addMedia=$('#intake-add-media'),mediaCount=$('#intake-media-count'),mediaList=$('#intake-media-list'),previewDialog=$('#intake-preview'),previewImage=$('#intake-preview-image'),previewClose=$('#intake-preview-close'),saveIntake=$('#intake-save'),newIntake=$('#intake-new');let intakeFiles=[],intakeBusy=false,intakeScanGeneration=0;let pendingSavedIntakeId=null;newIntake.onclick=()=>{if(!pendingSavedIntakeId)return;intakeForm.reset();pendingSavedIntakeId=null;newIntake.hidden=true;intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)});intakeFiles=[];renderIntakeFiles();$('#intake-msg').textContent='Nguồn Intake trước đã lưu trong Queue.'};const contentRequestsInFlight=new Set();function contentRequestKey(keyName){let key;try{key=localStorage.getItem(keyName)||sessionStorage.getItem(keyName);if(!key)key=crypto.randomUUID().replace(/-/g,'');localStorage.setItem(keyName,key);sessionStorage.setItem(keyName,key);if(localStorage.getItem(keyName)!==key)throw Error('storage verification failed');return key}catch(_){throw Error('CONTENT_IDEMPOTENCY_STORAGE_UNAVAILABLE')}}function clearContentRequestKey(keyName){try{localStorage.removeItem(keyName)}catch(_){}try{sessionStorage.removeItem(keyName)}catch(_){}}async function createContent(intakeId,button,externalConsent=false,sourceMediaRightsConfirmed=false){if(contentRequestsInFlight.has(intakeId))return false;contentRequestsInFlight.add(intakeId);if(button)button.disabled=true;const statusNode=button?.closest('article')?.querySelector('[data-intake-action-status]')||$('#intake-msg');statusNode.className='muted';statusNode.textContent='Đang kiểm tra Intake, dữ kiện và quyền nguồn…';const keyName='sala-content-idem:'+intakeId;let key,requestStarted=false,responseConfirmed=false,timeoutId;try{key=contentRequestKey(keyName);const controller=new AbortController();timeoutId=window.setTimeout(()=>controller.abort(),90000);statusNode.textContent='Đang gửi yêu cầu; chờ máy chủ xác minh điều kiện và trạng thái…';const request=fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/create-content',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({idempotency_key:key,external_text_processing_consent:externalConsent===true,source_media_rights_confirmed:sourceMediaRightsConfirmed===true}),signal:controller.signal});requestStarted=true;const r=await request;let d;try{d=await r.json()}catch(_){throw Error('Máy chủ trả phản hồi không hợp lệ; giữ khóa chống lặp để không gửi lại tự động.')}if(r.status!==201&&r.status!==200){if(r.status<500&&d.error!=='CONTENT_REQUEST_OUTCOME_UNKNOWN'&&d.provider_calls===0)clearContentRequestKey(keyName);if(['CONTENT_PREREQUISITES_REQUIRED','CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED','CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED'].includes(d.error)&&window.openMissingFields){await load();const record=(window.intakeRecords||[]).find(x=>x.id===intakeId);window.openMissingFields(intakeId,d,record)}else{statusNode.className='err';const uncertain=d.error==='CONTENT_REQUEST_OUTCOME_UNKNOWN'||d.previous_attempt_unverified;statusNode.textContent=(d.error||'CONTENT_CREATE_FAILED')+(uncertain?' · Lần trước chưa đối soát; không gửi lại.':d.provider_calls===0?' · Chưa gọi AI.':'')+' · Intake đã lưu: '+intakeId+'.';await load();if(d.review_id){await loadReviews();await window.loadReview(d.review_id)}}return false}responseConfirmed=true;clearContentRequestKey(keyName);statusNode.className='ok';statusNode.textContent='Đã tạo 5 bản nháp riêng tư. Chưa duyệt, chưa đăng.';await load();await loadReviews();await window.loadReview(d.review_id);window.onContentBatchCreated?.({review_id:d.review_id,intake_id:intakeId});return true}catch(e){statusNode.className='err';if(responseConfirmed){clearContentRequestKey(keyName);statusNode.textContent='Content đã lưu, nhưng màn hình chưa tải được. Mở lại Intake này để xem 5 bản nháp; không tạo lại.';try{await load()}catch(_){}}else if(!requestStarted){clearContentRequestKey(keyName);statusNode.textContent='Chưa gửi yêu cầu: không lưu được khóa chống lặp trên thiết bị. Hãy thử lại khi bộ nhớ trình duyệt hoạt động · Intake đã lưu: '+intakeId+'.'}else{const timedOut=e?.name==='AbortError';statusNode.textContent=(timedOut?'Quá 90 giây chưa có phản hồi.':'Mất kết nối trước khi xác nhận kết quả.')+' Kết quả chưa rõ; mã chống trùng được giữ. Không tạo Intake mới hoặc gửi yêu cầu khác; mở lại đúng Intake để đối soát · '+intakeId+'.';try{await load()}catch(_){}}return false}finally{if(timeoutId)window.clearTimeout(timeoutId);contentRequestsInFlight.delete(intakeId);if(button)button.disabled=false}}
 const isImageFile=file=>file.type.startsWith('image/')||/\\.(jpe?g|png|webp|heic)$/i.test(file.name);
 function renderIntakeFiles(){mediaCount.textContent=intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length===1?'1 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn';mediaList.replaceChildren();intakeFiles.forEach((item,index)=>{const card=document.createElement('div');card.className='intake-media-card';if(item.url){const open=document.createElement('button');open.type='button';open.className='intake-media-open';open.setAttribute('aria-label','Phóng to '+item.file.name);const img=document.createElement('img');img.className='intake-media-thumb';img.src=item.url;img.alt=item.file.name;open.append(img);open.onclick=()=>{previewImage.src=item.url;previewImage.alt=item.file.name;if(previewDialog.showModal)previewDialog.showModal();else window.open(item.url,'_blank','noopener')};card.append(open)}else{const icon=document.createElement('div');icon.className='intake-media-thumb';icon.textContent='TỆP';icon.setAttribute('aria-hidden','true');icon.style.display='grid';icon.style.placeItems='center';card.append(icon)}const name=document.createElement('span');name.className='intake-media-name';name.textContent=item.file.name+' · '+Math.ceil(item.file.size/1024)+' KB';card.append(name);if(item.duplicate){const badge=document.createElement('span');badge.className='intake-media-duplicate';badge.textContent='Ảnh trùng bytes · máy chủ sẽ giữ bản đầu';card.append(badge)}const remove=document.createElement('button');remove.type='button';remove.className='remove-media';remove.textContent='Bỏ ảnh/tệp';remove.disabled=intakeBusy;remove.onclick=()=>{if(item.url)URL.revokeObjectURL(item.url);intakeFiles.splice(index,1);scanIntakeDuplicates()};card.append(remove);mediaList.append(card)})}
 async function scanIntakeDuplicates(){const generation=++intakeScanGeneration;intakeBusy=true;mediaInput.disabled=true;addMedia.disabled=true;renderIntakeFiles();const seen=new Set();let unsupported=false;for(const item of intakeFiles){item.duplicate=false;if(!isImageFile(item.file))continue;if(!window.crypto||!window.crypto.subtle){unsupported=true;continue}try{const bytes=await item.file.arrayBuffer(),digest=Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');item.duplicate=seen.has(digest);seen.add(digest)}catch(_){unsupported=true}}if(generation!==intakeScanGeneration)return;intakeBusy=false;mediaInput.disabled=false;addMedia.disabled=false;renderIntakeFiles();const duplicates=intakeFiles.filter(x=>x.duplicate).length;mediaCount.textContent=(intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn')+(duplicates?' · phát hiện '+duplicates+' ảnh trùng, bản đầu được giữ':'')+(unsupported?' · máy chủ sẽ kiểm tra trùng bytes':'')}
@@ -1916,6 +1956,58 @@ class Handler(BaseHTTPRequestHandler):
                 (record.get("source") == "TEST_ONLY" or any("TEST_ONLY" in str(record.get(k, "")) for k in ("sourceGroup", "note", "clientBatchId")))):
             self.send_json({"error": "TEST_ONLY_INTAKE_BLOCKED", "published": False}, 403)
             return
+        center = self.review_center_or_error()
+        if center is None:
+            return
+        # Reopen completed work without another provider request; never turn a
+        # new browser key into a retry after a previous attempt may have run.
+        with PROPERTY_OPERATION_LOCK:
+            existing_package = next((package for package in center.packages.values()
+                if str((package.get("candidate") or {}).get("intake_id") or "") == intake_id), None)
+            if existing_package is not None:
+                evidence_revisions = existing_package.get("evidence_revisions")
+                saved_evidence = (evidence_revisions[-1].get("evidence")
+                    if isinstance(evidence_revisions, list) and evidence_revisions
+                    and isinstance(evidence_revisions[-1], dict) else None)
+                if requested_evidence is not None and requested_evidence != saved_evidence:
+                    self.send_json({"error": "EVIDENCE_INTAKE_MISMATCH", "intake_id": intake_id,
+                        "review_id": existing_package.get("review_id"), "provider_calls": 0,
+                        "published": False}, 409)
+                    return
+                batches = existing_package.get("content_batches") if isinstance(existing_package.get("content_batches"), list) else []
+                complete_batch = next((batch for batch in reversed(batches)
+                    if isinstance(batch, dict) and isinstance(batch.get("variants"), list)
+                    and len(batch["variants"]) == 5), None)
+                if complete_batch is not None:
+                    prior_success = next((entry for entry in reversed(existing_package.get("content_generation_requests", []))
+                        if entry.get("status") == "SUCCEEDED" and isinstance(entry.get("response"), dict)), None)
+                    recovered = deepcopy(prior_success["response"]) if prior_success else {
+                        "status": complete_batch.get("status", "PRIVATE_DRAFT"),
+                        "intake_id": intake_id, "review_id": existing_package.get("review_id"),
+                        "review_revision": complete_batch.get("review_revision"),
+                        "content_batch_id": complete_batch.get("content_batch_id"),
+                        "facts_revision_id": complete_batch.get("facts_revision_id"),
+                        "generation": complete_batch.get("generation"),
+                        "variants": complete_batch["variants"], "published": False,
+                        "mutated_property_store": False,
+                    }
+                    recovered["idempotent_replay"] = True
+                    self.send_json(recovered, 200)
+                    return
+                prior_attempt = next((entry for entry in reversed(existing_package.get("content_generation_requests", []))
+                    if isinstance(entry, dict) and entry.get("status") in {"IN_PROGRESS", "BLOCKED"}), None)
+                if prior_attempt is not None:
+                    previous_response = prior_attempt.get("response") if isinstance(prior_attempt.get("response"), dict) else {}
+                    try:
+                        previous_provider_calls = int(previous_response.get("provider_calls") or 0)
+                    except (TypeError, ValueError):
+                        previous_provider_calls = 0
+                    if prior_attempt.get("status") == "IN_PROGRESS" or previous_provider_calls > 0:
+                        self.send_json({"error": "CONTENT_REQUEST_OUTCOME_UNKNOWN",
+                            "intake_id": intake_id, "review_id": existing_package.get("review_id"),
+                            "provider_calls": 0, "previous_attempt_unverified": True,
+                            "published": False}, 409)
+                        return
         missing_fields, missing_evidence = intake_content_readiness(record)
         candidate_preview = to_candidate(record)
         stored_evidence = record.get("ownerEvidence") if isinstance(record.get("ownerEvidence"), dict) else None
@@ -1954,9 +2046,6 @@ class Handler(BaseHTTPRequestHandler):
         if (os.environ.get("BMT_ENV") != "staging" and not test_only) or not _CONTENT_LIVE_ENABLED:
             self.send_json({"error": "CONTENT_PHASE_DISABLED", "intake_id": intake_id,
                             "provider_calls": 0, "published": False}, 403)
-            return
-        center = self.review_center_or_error()
-        if center is None:
             return
         try:
             with PROPERTY_OPERATION_LOCK:
@@ -2161,15 +2250,18 @@ class Handler(BaseHTTPRequestHandler):
                     variant.update({"title": title.strip(), "body": body.strip(), "content_revision": int(variant["content_revision"]) + 1, "status": "DRAFT", "edited_by": owner_id, "edited_at": now_iso()})
                     package.pop("selected_content", None)
                 elif action == "select":
-                    if package.get("state") != "APPROVED" or not property_id or not property_revision:
-                        raise ValueError("GATE_A_PROPERTY_REQUIRED")
                     if int(batch.get("review_revision", -1)) != int(package.get("review_revision", -2)):
                         raise ValueError("CONTENT_FACTS_REVISION_STALE")
-                    facts_revision_id = f"facts-{property_id}-r{property_revision}"
-                    batch.update({"property_id": property_id, "property_revision": property_revision, "facts_revision_id": facts_revision_id})
+                    # Selecting a private draft is a reversible Owner choice,
+                    # not Gate A approval or canonical Property Core mutation.
+                    if package.get("state") == "APPROVED" and property_id and property_revision:
+                        facts_revision_id = f"facts-{property_id}-r{property_revision}"
+                        batch.update({"property_id": property_id, "property_revision": property_revision, "facts_revision_id": facts_revision_id})
                     for item in batch["variants"]:
-                        item.update({"property_id": property_id, "property_revision": property_revision, "facts_revision_id": facts_revision_id})
-                    variant["selected"] = True
+                        item["selected"] = item.get("content_variant_id") == variant_id
+                        if package.get("state") == "APPROVED" and property_id and property_revision:
+                            item.update({"property_id": property_id, "property_revision": property_revision,
+                                         "facts_revision_id": f"facts-{property_id}-r{property_revision}"})
                     package["selected_content_variant_id"] = variant_id
                     package.pop("selected_content", None)
                 else:
@@ -2639,13 +2731,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             body = page()
-            body = body.replace(b"</style></head>", HOME_CSS.encode("utf-8") + b"</style></head>", 1)
+            body = body.replace(b"</style></head>", HOME_CSS.encode("utf-8") + INTAKE_WORKFLOW_CSS.encode("utf-8") + b"</style></head>", 1)
             body = body.replace(b"<main>", b"<main>" + HOME_HTML.encode("utf-8"), 1)
             old_owner_nav = '<nav class="owner-nav" aria-label="Điều hướng Admin"><a href="#home-dashboard">Home</a><a href="#intake-section">Nhập nguồn</a><a href="#review-section">Content / xác nhận dữ kiện</a><a href="/website">Quản lý Website</a></nav>'.encode("utf-8")
             body = body.replace(old_owner_nav, OWNER_NAV_HTML.encode("utf-8"), 1)
             body = body.replace(b'<section class="card"><p class="kicker">QUEUE</p>', b'<section id="queue-section" class="card"><p class="kicker">QUEUE</p>', 1)
             body = body.replace(b"</main><script>", MISSING_FIELDS_MARKUP.encode("utf-8") + b"</main><script>", 1)
-            body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + b'</body></html>', 1)
+            body = body.replace(b'</script></body></html>', b'</script>' + HOME_SCRIPT.encode("utf-8") + CONTENT_STUDIO_UI + PUBLIC_RELEASE_UI + INTAKE_WORKFLOW_SCRIPT.encode("utf-8") + b'</body></html>', 1)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -2661,7 +2753,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/analytics/report":
             self.analytics_report()
         elif path == "/api/intakes":
-            self.send_json([project_intake_prefill(item) for item in load_index()])
+            self.send_json([project_intake_admin_list_item(item, REVIEW_CENTER) for item in load_index()])
         elif (intake_media_match := re.fullmatch(r"/api/intakes/([^/]+)/media/(media-[a-f0-9]{24})", path)):
             intake_id, media_id = intake_media_match.groups()
             record = next((item for item in load_index() if item.get("id") == intake_id), None)

@@ -51,6 +51,18 @@ def _fact(value: Any, text: str, offsets: list[int], span: tuple[int, int], inta
     }
 
 
+def is_placeholder_location(value: Any) -> bool:
+    """Reject short time/status words that can be captured as an address."""
+    if not isinstance(value, str):
+        return value in (None, "")
+    folded, _ = _fold_with_offsets(value.strip())
+    normalized = " ".join(folded.split()).strip(" .,:;-–—")
+    return normalized in {
+        "ngay", "hom nay", "hom qua", "ngay mai", "ngay kia",
+        "hien tai", "dang cap nhat", "chua ro", "khong ro", "unknown", "n a",
+    }
+
+
 def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int = 1) -> dict[str, Any]:
     """Extract conservative candidate facts plus evidence spans/conflicts."""
     text = str(note or "")
@@ -136,7 +148,7 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
         group = location_match.span(1)
         loc, _, _ = _source_span(text, offsets, *group)
         loc = re.split(r"\s+(?:gia|dien tich|rong|dai|xay dung)\b", loc, maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,.-")
-        if loc:
+        if loc and not is_placeholder_location(loc):
             put("address", loc, group)
 
     area_matches = list(re.finditer(r"(?<!\w)(\d+(?:[.,]\d+)?)\s*(?:m\s*2|sqm|met vuong)\b", folded))

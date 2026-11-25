@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import admin.admin_server as admin
-from property_memory.source_prefill import extract_source_facts
+from property_memory.source_prefill import extract_source_facts, is_placeholder_location
 
 
 def main() -> None:
@@ -82,6 +82,24 @@ def main() -> None:
     owner_conflict_record = {**saved_with_stale_conflict, "conflicts": [owner_conflict]}
     owner_conflict_projection = admin.project_intake_prefill(owner_conflict_record)
     assert owner_conflict in owner_conflict_projection["conflicts"]
+
+    # The old live intake stored a time/status word as an address. The read
+    # model must reject it without rewriting the saved input or its revision.
+    for placeholder in ("ngay", "hôm nay", "đang cập nhật", "chưa rõ", "unknown"):
+        assert is_placeholder_location(placeholder)
+    assert not is_placeholder_location("Mặt tiền Tôn Đức Thắng, EcoCity")
+    saved_placeholder = {
+        "id": "TEST_ONLY-placeholder-address", "inputRevision": 3,
+        "note": "Cho thuê căn hộ EcoCity, giá 6 triệu/tháng",
+        "preliminaryFacts": {"address": "ngay"}, "media": [],
+    }
+    placeholder_before = deepcopy(saved_placeholder)
+    placeholder_projection = admin.project_intake_prefill(saved_placeholder)
+    missing_location, _ = admin.intake_content_readiness(placeholder_projection)
+    assert "address" not in placeholder_projection["preliminaryFacts"]
+    assert placeholder_projection["invalidPrefillFields"] == ["address"]
+    assert "address" in missing_location
+    assert saved_placeholder == placeholder_before
 
     explicit_sale = extract_source_facts(
         "Cần bán căn hộ EcoCity; giá bán 2 tỷ",

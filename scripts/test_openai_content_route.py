@@ -105,10 +105,42 @@ def main():
       assert provider.calls==1 and len(usage.rows)==1
       again=call(handler,intake["id"],"TEST_ONLY-idempotency-key-001")
       assert again["status"]==200 and len(again["value"]["variants"])==5 and provider.calls==1 and len(usage.rows)==1
+      # A fresh browser key after reload must recover the same five drafts,
+      # not create another billable generation.
+      cross_key_recovery=call(handler,intake["id"],"TEST_ONLY-new-browser-key-002")
+      assert cross_key_recovery["status"]==200 and cross_key_recovery["value"]["idempotent_replay"] is True
+      assert cross_key_recovery["value"]["content_batch_id"]==body["content_batch_id"]
+      assert provider.calls==1 and len(usage.rows)==1
+      pending_package=center.packages[body["review_id"]]
+      selected_variant=pending_package["content_batches"][0]["variants"][0]
+      select_out={}
+      select_handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center,
+        send_json=lambda value,status=200:select_out.update(value=value,status=status))
+      admin.Handler.content_route_post(select_handler,body["review_id"],"select",{
+        "content_variant_id":selected_variant["content_variant_id"],
+        "expected_content_revision":selected_variant["content_revision"]})
+      assert select_out["status"]==200 and pending_package["selected_content_variant_id"]==selected_variant["content_variant_id"]
+      assert pending_package["state"]!="APPROVED" and store.list_properties()==[]
+      assert not pending_package["content_batches"][0].get("property_id")
+      assert provider.calls==1 and len(usage.rows)==1
       persisted=center.packages[pkg["review_id"]]
       assert len(persisted["content_batches"])==1 and len(persisted["content_batches"][0]["variants"])==5
       assert persisted["content_batches"][0]["status"]=="PRIVATE_DRAFT"
       assert store.list_properties()==[]
+      uncertain_intake={"id":"TEST_ONLY-intake-unknown","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-unknown",
+        "note":"TEST_ONLY synthetic source","preliminaryFacts":dict(intake["preliminaryFacts"]),
+        "ownerEvidence":dict(intake["ownerEvidence"]),"media":[]}
+      records.append(uncertain_intake)
+      uncertain_pkg=process_intake(store,center,uncertain_intake,ai_gateway=None,operation_id=uncertain_intake["id"])
+      uncertain_pkg=center.packages[uncertain_pkg["review_id"]]
+      uncertain_pkg.setdefault("content_generation_requests",[]).append({"status":"BLOCKED",
+        "response":{"error":"CONTENT_PROVIDER_ERROR","provider_calls":1,"usage":"UNKNOWN"}})
+      center._persist(uncertain_pkg)
+      unknown_replay=call(handler,uncertain_intake["id"],"TEST_ONLY-different-key-after-unknown-003")
+      assert unknown_replay["status"]==409
+      assert unknown_replay["value"]["error"]=="CONTENT_REQUEST_OUTCOME_UNKNOWN"
+      assert unknown_replay["value"]["previous_attempt_unverified"] is True
+      assert provider.calls==1 and len(usage.rows)==1 and store.list_properties()==[]
       denied=SimpleNamespace(owner_id=lambda:None,review_center_or_error=lambda:center,send_json=lambda v,status=200:None)
       denied_out=call(denied,intake["id"],"TEST_ONLY-anonymous-key-001")
       assert denied_out["status"]==403 and provider.calls==1
@@ -308,6 +340,32 @@ def main():
       "stage":"source_conflicts","rule":"provider_reported_conflict","allowed_field_count":1,"fields":["title"]}
     no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights,usage_sink=Usage())
     assert out["status"]=="BLOCKED" and no_rights.calls==0
+    # Same synthetic Content batch now continues through Gate A and Gate B:
+    # draft selection before Gate A is private, then the approved variant is
+    # linked to canonical property/revision without publishing a projection.
+    gate_package=center.packages[body["review_id"]]
+    gate_result=center.approve(gate_package["review_id"],expected_revision=gate_package["review_revision"],
+      owner_id="owner",decision="CREATE_NEW_PROPERTY",idempotency_key="TEST_ONLY-gate-a-content-001")
+    property_id=gate_result["mutation_result"]["property_id"]
+    approved_variant=next(v for batch in gate_result["content_batches"] for v in batch["variants"]
+      if v["content_variant_id"]==gate_result["selected_content_variant_id"])
+    route_result={};route_handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center,
+      send_json=lambda value,status=200:route_result.update(value=value,status=status))
+    admin.Handler.content_route_post(route_handler,gate_package["review_id"],"select",{
+      "content_variant_id":approved_variant["content_variant_id"],
+      "expected_content_revision":approved_variant["content_revision"]})
+    assert route_result["status"]==200,route_result
+    approved_variant=next(v for batch in center.packages[gate_package["review_id"]]["content_batches"] for v in batch["variants"]
+      if v["content_variant_id"]==approved_variant["content_variant_id"])
+    route_result={};admin.Handler.content_route_post(route_handler,gate_package["review_id"],"approve-channel",{
+      "content_variant_id":approved_variant["content_variant_id"],
+      "expected_content_revision":approved_variant["content_revision"],"channel":"public_web"})
+    linked=center.packages[gate_package["review_id"]].get("selected_content") or {}
+    assert route_result["status"]==200 and route_result["value"]["published"] is False
+    assert linked.get("property_id")==property_id and linked.get("property_revision")==center.store.get(property_id)["property_revision"]
+    assert linked.get("content_variant_id")==approved_variant["content_variant_id"]
+    assert center.packages[gate_package["review_id"]]["state"]=="APPROVED"
+    assert len(store.list_properties())==1
     store.close()
-  print("PASS: authenticated loopback HTTP missing-fields 409/provider=0 → same-intake draft save → 201/5 private variants → replay 200; A/B evidence mismatch 409; 0 Property Core writes/publish")
+  print("PASS: one mock generation → five private drafts → select before Gate A → Gate A → linked public_web draft approval; no publication")
 if __name__=="__main__":main()

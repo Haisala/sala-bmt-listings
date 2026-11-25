@@ -12,7 +12,7 @@ const end = source.indexOf("\nconst isImageFile=", start);
 assert.notEqual(end, -1, "actual Intake Content UI handler has a bounded source block");
 const handlerSource = source.slice(start, end);
 
-function makeContext({ fetch, localStore = new Map(), opened = [] }) {
+function makeContext({ fetch, localStore = new Map(), opened = [], loadReview = async () => {}, onBatch = () => {} }) {
   const makeStorage = (store) => ({
     getItem: (key) => store.get(key) ?? null,
     setItem: (key, value) => store.set(key, String(value)),
@@ -29,7 +29,8 @@ function makeContext({ fetch, localStore = new Map(), opened = [] }) {
     window: {
       clearTimeout() {},
       intakeRecords: [{ id: "TEST_ONLY-intake-resume", inputRevision: 1 }],
-      loadReview: async () => {},
+      loadReview,
+      onContentBatchCreated: onBatch,
       openMissingFields: (...args) => opened.push(args),
       setTimeout() { return 1; },
     },
@@ -129,7 +130,18 @@ async function main() {
   assert.equal(replayedKey, uncertain.localStore.get("sala-content-idem:TEST_ONLY-intake-resume"));
   assert.equal(uncertain.localStore.size, 1, "same-Intake resume does not rotate key on uncertain outcome");
 
-  console.log("PASS: disabled submit dispatch, separate rights/paid-consent gates, same-Intake sheet, double-action guard, timeout persistence, same-key resume");
+  let confirmedPosts = 0;
+  const renderFailure = makeContext({
+    fetch: async () => { confirmedPosts += 1; return { status: 201, json: async () => ({ review_id: "TEST_ONLY-review", content_batch_id: "TEST_ONLY-batch" }) }; },
+    loadReview: async () => { throw new Error("TEST_ONLY-render-failure"); },
+  });
+  assert.equal(await renderFailure.context.runCreateContent("TEST_ONLY-intake-resume", { disabled: true, closest: () => null }), false);
+  assert.match(renderFailure.status.textContent, /Content đã lưu/);
+  assert.doesNotMatch(renderFailure.status.textContent, /Kết quả chưa rõ/);
+  assert.equal(renderFailure.localStore.size, 0, "confirmed HTTP 201 does not retain an ambiguous retry key");
+  assert.equal(confirmedPosts, 1, "a view-render failure does not retry the confirmed generation");
+
+  console.log("PASS: disabled submit dispatch, separate consent gates, double-action guard, timeout persistence, idempotent recovery, confirmed-201/render-failure handling");
 }
 
 main().catch((error) => { console.error(error.message); process.exitCode = 1; });
