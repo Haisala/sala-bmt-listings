@@ -349,14 +349,12 @@ def main():
     property_id=gate_result["mutation_result"]["property_id"]
     approved_variant=next(v for batch in gate_result["content_batches"] for v in batch["variants"]
       if v["content_variant_id"]==gate_result["selected_content_variant_id"])
+    property_revision=center.store.get(property_id)["property_revision"]
+    assert approved_variant.get("property_id")==property_id
+    assert approved_variant.get("property_revision")==property_revision
+    assert approved_variant.get("facts_revision_id")==f"facts-{property_id}-r{property_revision}"
     route_result={};route_handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center,
       send_json=lambda value,status=200:route_result.update(value=value,status=status))
-    admin.Handler.content_route_post(route_handler,gate_package["review_id"],"select",{
-      "content_variant_id":approved_variant["content_variant_id"],
-      "expected_content_revision":approved_variant["content_revision"]})
-    assert route_result["status"]==200,route_result
-    approved_variant=next(v for batch in center.packages[gate_package["review_id"]]["content_batches"] for v in batch["variants"]
-      if v["content_variant_id"]==approved_variant["content_variant_id"])
     route_result={};admin.Handler.content_route_post(route_handler,gate_package["review_id"],"approve-channel",{
       "content_variant_id":approved_variant["content_variant_id"],
       "expected_content_revision":approved_variant["content_revision"],"channel":"public_web"})

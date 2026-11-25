@@ -342,6 +342,15 @@ class ReviewCenter:
                 package["state"] = APPROVED
                 package["decision"] = {"type": "APPROVE", "owner_id": owner_id, "revision": expected_revision, "idempotency_key": idempotency_key, "at": _now()}
                 package["mutation_result"] = deepcopy(result)
+                property_revision = int((self.store.get(result["property_id"]) or {}).get("property_revision") or 0)
+                if property_revision:
+                    facts_revision_id = f"facts-{result['property_id']}-r{property_revision}"
+                    for batch in package.get("content_batches", []):
+                        batch.update({"property_id": result["property_id"], "property_revision": property_revision,
+                                      "facts_revision_id": facts_revision_id})
+                        for variant in batch.get("variants", []):
+                            variant.update({"property_id": result["property_id"], "property_revision": property_revision,
+                                            "facts_revision_id": facts_revision_id})
                 package["updated_at"] = package["decision"]["at"]
                 self._persist(package)
                 return deepcopy(package)
