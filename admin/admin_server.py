@@ -23,7 +23,7 @@ import threading
 import tempfile
 import unicodedata
 from copy import deepcopy
-from collections import deque
+from collections import OrderedDict, deque
 import uuid
 import fcntl
 import time
@@ -71,6 +71,7 @@ PORT = int(os.environ.get("BMT_ADMIN_PORT", "8876"))
 PASSWORD_FILE = Path(os.environ.get("BMT_ADMIN_PASSWORD_FILE", "/Users/trandinhhieu/BMTPropertyHubPrivate/admin-password"))
 ALLOWED_REMOTE_IP = os.environ.get("BMT_ADMIN_ALLOWED_IP", "")
 SESSION_TTL = 8 * 60 * 60
+LOGIN_PRESESSION_TTL = 10 * 60
 SECURE_COOKIE = os.environ.get("BMT_ADMIN_SECURE_COOKIE", "0").strip().lower() in {"1", "true", "yes"}
 RETRY_LIMIT = 3
 MAX_BODY = 50 * 1024 * 1024
@@ -80,6 +81,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 CHANNELS = ("public_web", "zalo_company", "facebook", "tiktok")
 SESSIONS: dict[str, float] = {}
 SESSION_OWNERS: dict[str, str] = {}
+LOGIN_PRESESSIONS: "LoginPreSessionStore"
 PRIVATE_FILE_LOCK = threading.RLock()
 PROPERTY_OPERATION_LOCK = threading.RLock()
 REVIEW_CENTER: ReviewCenter | None = None
@@ -206,7 +208,7 @@ class AuthCorrelationSink:
     """Short-lived, application-layer auth correlation with secret-free fields."""
 
     RETENTION_SECONDS = 10 * 60
-    ALLOWED_PATHS = frozenset({"/api/auth/login", "/api/auth/logout"})
+    ALLOWED_PATHS = frozenset({"/api/auth/login", "/api/auth/logout", "/login"})
 
     def __init__(self) -> None:
         self.path = PRIVATE_ROOT / "auth-correlation.jsonl"
@@ -220,7 +222,8 @@ class AuthCorrelationSink:
             return "unknown"
         return f"{code // 100}xx" if 100 <= code <= 599 else "unknown"
 
-    def record(self, stage: str, path: str, status: int | str, branch: str = "") -> str:
+    def record(self, stage: str, path: str, status: int | str, branch: str = "", *,
+               method: str = "POST", details: dict[str, object] | None = None) -> str:
         normalized = urlparse(path).path
         if normalized not in self.ALLOWED_PATHS:
             return ""
@@ -230,7 +233,7 @@ class AuthCorrelationSink:
             "timestamp": now_iso(),
             "correlation_hash": correlation,
             "route_identity": "staging-auth",
-            "method": "POST" if normalized == "/api/auth/login" else "POST",
+            "method": method if method in {"GET", "POST"} else "UNKNOWN",
             "path": normalized,
             "status_class": self._status_class(status),
             "stage": stage,
@@ -238,6 +241,19 @@ class AuthCorrelationSink:
             "pid": os.getpid(),
             "process_identity": "bmt-property-hub-staging",
         }
+        if normalized == "/login" and details:
+            allowed = {
+                "origin_state": {"ABSENT", "NULL", "TRUSTED", "FOREIGN", "MALFORMED"},
+                "referer_state": {"ABSENT", "TRUSTED", "FOREIGN", "MALFORMED"},
+                "fetch_site_state": {"ABSENT", "SAME_ORIGIN", "SAME_SITE", "NONE", "CROSS_SITE", "INVALID"},
+                "normalized_origin_match": {"MATCH", "NO_MATCH", "NOT_PRESENT", "INVALID"},
+                "csrf_state": {"VALID", "MISSING", "INVALID", "EXPIRED"},
+                "rejection_reason": {"NONE", "REMOTE_DENIED", "SECURITY_CONFIG", "ORIGIN_INVALID", "ORIGIN_FOREIGN", "REFERER_INVALID", "REFERER_FOREIGN", "SOURCE_CONFLICT", "CROSS_SITE", "FETCH_METADATA_INVALID", "CSRF_MISSING", "CSRF_INVALID", "CSRF_EXPIRED", "PASSWORD_REJECTED"},
+            }
+            for key, choices in allowed.items():
+                value = details.get(key)
+                if value in choices:
+                    row[key] = value
         with self.lock:
             try:
                 self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -245,8 +261,11 @@ class AuthCorrelationSink:
                 lines = []
                 if self.path.is_file():
                     if now - self.path.stat().st_mtime < self.RETENTION_SECONDS:
-                        lines = [line for line in self.path.read_text(encoding="utf-8").splitlines() if line]
+                        with self.path.open("rb") as previous:
+                            previous.seek(max(0, self.path.stat().st_size - 64 * 1024))
+                            lines = [line for line in previous.read(64 * 1024).decode("utf-8", "replace").splitlines() if line][-99:]
                 lines.append(json.dumps(row, sort_keys=True))
+                lines = lines[-100:]
                 tmp = self.path.with_name(self.path.name + ".tmp")
                 tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
                 tmp.chmod(0o600)
@@ -258,6 +277,152 @@ class AuthCorrelationSink:
 
 AUTH_DIAGNOSTIC = AuthDiagnostic()
 AUTH_CORRELATION = AuthCorrelationSink()
+
+
+class LoginPreSessionStore:
+    """Bounded, process-local, single-use login CSRF tokens tied to a cookie."""
+
+    MAX_SESSIONS = 512
+    MAX_TOKENS_PER_SESSION = 8
+
+    def __init__(self, ttl_seconds: int = LOGIN_PRESESSION_TTL) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._sessions: OrderedDict[str, tuple[float, OrderedDict[str, float]]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def issue(self, cookie_value: str = "", *, now: float | None = None) -> tuple[str, str]:
+        current = time.time() if now is None else now
+        with self._lock:
+            for key, (expires, _) in list(self._sessions.items()):
+                if expires <= current:
+                    self._sessions.pop(key, None)
+            cookie_key = self._digest(cookie_value) if cookie_value else ""
+            entry = self._sessions.get(cookie_key) if cookie_key else None
+            if entry is None or entry[0] <= current:
+                cookie_value = secrets.token_urlsafe(32)
+                cookie_key = self._digest(cookie_value)
+                entry = (current + self.ttl_seconds, OrderedDict())
+            expires, tokens = entry
+            token = secrets.token_urlsafe(32)
+            tokens[self._digest(token)] = current + self.ttl_seconds
+            while len(tokens) > self.MAX_TOKENS_PER_SESSION:
+                tokens.popitem(last=False)
+            self._sessions[cookie_key] = (max(expires, current + self.ttl_seconds), tokens)
+            self._sessions.move_to_end(cookie_key)
+            while len(self._sessions) > self.MAX_SESSIONS:
+                self._sessions.popitem(last=False)
+            return cookie_value, token
+
+    def consume(self, cookie_value: str, token: str, *, now: float | None = None) -> str:
+        current = time.time() if now is None else now
+        if not cookie_value or not token:
+            return "MISSING"
+        cookie_key = self._digest(cookie_value)
+        token_key = self._digest(token)
+        with self._lock:
+            entry = self._sessions.get(cookie_key)
+            if entry is None:
+                return "INVALID"
+            expires, tokens = entry
+            if expires <= current:
+                self._sessions.pop(cookie_key, None)
+                return "EXPIRED"
+            matched_key = next((key for key in tokens if hmac.compare_digest(key, token_key)), None)
+            if matched_key is None:
+                return "INVALID"
+            token_expires = tokens.pop(matched_key)
+            if token_expires <= current:
+                return "EXPIRED"
+            return "VALID"
+
+    def revoke(self, cookie_value: str) -> None:
+        if not cookie_value:
+            return
+        with self._lock:
+            self._sessions.pop(self._digest(cookie_value), None)
+
+
+LOGIN_PRESESSIONS = LoginPreSessionStore()
+
+
+def login_source_diagnostics(origin_header: str | None, referer_header: str | None,
+                             fetch_site_header: str | None = None) -> tuple[bool, str, dict[str, str]]:
+    allowed = trusted_origins()
+    origin_state = "ABSENT"
+    origin_value = None
+    if origin_header is not None:
+        if origin_header.strip() == "null":
+            origin_state = "NULL"
+        else:
+            origin_value = _origin_from_url(origin_header.strip(), allow_path=False)
+            origin_state = "MALFORMED" if origin_value is None else ("TRUSTED" if origin_value in allowed else "FOREIGN")
+    referer_state = "ABSENT"
+    referer_value = None
+    if referer_header is not None:
+        referer_value = _origin_from_url(referer_header.strip(), allow_path=True)
+        referer_state = "MALFORMED" if referer_value is None else ("TRUSTED" if referer_value in allowed else "FOREIGN")
+
+    fetch_site_state = "ABSENT"
+    if fetch_site_header is not None:
+        fetch_site_state = {
+            "same-origin": "SAME_ORIGIN", "same-site": "SAME_SITE",
+            "none": "NONE", "cross-site": "CROSS_SITE",
+        }.get(fetch_site_header.strip().lower(), "INVALID")
+
+    reason = "NONE"
+    accepted = True
+    if origin_state == "MALFORMED":
+        accepted, reason = False, "ORIGIN_INVALID"
+    elif origin_state == "FOREIGN":
+        accepted, reason = False, "ORIGIN_FOREIGN"
+    elif referer_state == "MALFORMED":
+        accepted, reason = False, "REFERER_INVALID"
+    elif referer_state == "FOREIGN":
+        accepted, reason = False, "REFERER_FOREIGN"
+    elif origin_value and referer_value and origin_value != referer_value:
+        accepted, reason = False, "SOURCE_CONFLICT"
+
+    if fetch_site_state == "CROSS_SITE":
+        accepted, reason = False, "CROSS_SITE"
+    elif fetch_site_state == "INVALID":
+        accepted, reason = False, "FETCH_METADATA_INVALID"
+
+    if origin_state == "TRUSTED":
+        origin_match = "MATCH"
+    elif origin_state == "FOREIGN":
+        origin_match = "NO_MATCH"
+    elif origin_state == "MALFORMED":
+        origin_match = "INVALID"
+    elif referer_state == "TRUSTED":
+        origin_match = "MATCH"
+    elif referer_state in {"FOREIGN", "MALFORMED"}:
+        origin_match = "NO_MATCH" if referer_state == "FOREIGN" else "INVALID"
+    else:
+        origin_match = "NOT_PRESENT"
+    details = {"origin_state": origin_state, "referer_state": referer_state,
+               "fetch_site_state": fetch_site_state,
+               "normalized_origin_match": origin_match, "csrf_state": "MISSING",
+               "rejection_reason": reason}
+    return accepted, reason, details
+
+
+def login_header_diagnostics(headers: Any) -> tuple[bool, str, dict[str, str]]:
+    origins = headers.get_all("Origin", []) or []
+    referers = headers.get_all("Referer", []) or []
+    fetch_sites = headers.get_all("Sec-Fetch-Site", []) or []
+    accepted, reason, details = login_source_diagnostics(
+        origins[0] if len(origins) == 1 else ("" if len(origins) > 1 else None),
+        referers[0] if len(referers) == 1 else ("" if len(referers) > 1 else None),
+        fetch_sites[0] if len(fetch_sites) == 1 else ("" if len(fetch_sites) > 1 else None),
+    )
+    if len(origins) > 1 or len(referers) > 1 or len(fetch_sites) > 1:
+        accepted, reason = False, "SOURCE_CONFLICT"
+        details["rejection_reason"] = reason
+    return accepted, reason, details
 
 
 def route_classification(path: str, method: str = "GET") -> str:
@@ -289,7 +454,7 @@ def _origin_from_url(value: str, *, allow_path: bool) -> str | None:
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             return None
-        if parsed.query or parsed.fragment or (not allow_path and parsed.path not in {"", "/"}):
+        if not allow_path and (parsed.query or parsed.fragment or parsed.path not in {"", "/"}):
             return None
         host = parsed.hostname.lower()
         if ":" in host:
@@ -1179,9 +1344,10 @@ def password_ok(value: str) -> bool:
     return bool(expected) and hmac.compare_digest(value, expected)
 
 
-def login_page(message: str = "") -> bytes:
+def login_page(message: str = "", csrf_token: str = "") -> bytes:
     notice = f'<p class="err">{html.escape(message)}</p>' if message else ""
-    return (f'''<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BMT Admin — Đăng nhập</title><style>body{{font-family:system-ui,sans-serif;background:#f8fafc;color:#15243a;margin:0}}main{{max-width:420px;margin:12vh auto;padding:24px}}form{{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:22px}}input,button{{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;font:inherit}}input{{border:1px solid #cbd5e1;margin:10px 0 14px}}button{{border:0;background:#0f2d5b;color:#fff;font-weight:800}}.err{{color:#b91c1c}}</style></head><body><main><h1>BMT Property Hub</h1><p>Admin nội bộ</p>{notice}<form method="post" action="/login"><label>Mật khẩu Admin</label><input name="password" type="password" autocomplete="current-password" required><button>Đăng nhập</button></form></main></body></html>''').encode("utf-8")
+    token = html.escape(csrf_token, quote=True)
+    return (f'''<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="strict-origin-when-cross-origin"><title>BMT Admin — Đăng nhập</title><style>body{{font-family:system-ui,sans-serif;background:#f8fafc;color:#15243a;margin:0}}main{{max-width:420px;margin:12vh auto;padding:24px}}form{{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:22px}}input,button{{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;font:inherit}}input{{border:1px solid #cbd5e1;margin:10px 0 14px}}button{{border:0;background:#0f2d5b;color:#fff;font-weight:800}}.err{{color:#b91c1c}}</style></head><body><main><h1>BMT Property Hub</h1><p>Admin nội bộ</p>{notice}<form method="post" action="/login"><input type="hidden" name="csrf_token" value="{token}"><label>Mật khẩu Admin</label><input name="password" type="password" autocomplete="current-password" required><button>Đăng nhập</button></form></main></body></html>''').encode("utf-8")
 
 
 EVIDENCE_UI = '''<section id="owner-evidence" class="card" style="margin-top:16px"><p class="kicker">OWNER EVIDENCE · PRIVATE</p><h2>Evidence cho review hiện tại</h2><p class="muted">Review: review-6c508fe1ab9c0638a882a604</p><p id="evidence-missing" class="err">Đang kiểm tra trường còn thiếu...</p><form id="evidence-form"><label>Source ID</label><input name="source_id" required placeholder="Owner nhập source thật"><label>Claim được source hỗ trợ</label><textarea name="claim" required placeholder="Owner nhập claim thật"></textarea><label>Rights của citation</label><select name="citation_rights" required><option value="">Chọn rights</option><option>COMPANY</option><option>PERSONAL</option><option>APPROVED</option></select><label>Rights cấp review</label><select name="rights_status" required><option value="">Chọn rights</option><option>COMPANY</option><option>PERSONAL</option><option>APPROVED</option></select><button type="submit">Lưu evidence revision</button><p id="evidence-msg" class="muted"></p></form><script>(async()=>{const id='review-6c508fe1ab9c0638a882a604',missing=document.querySelector('#evidence-missing'),msg=document.querySelector('#evidence-msg'),form=document.querySelector('#evidence-form');try{const r=await fetch('/api/reviews/'+id+'/evidence'),d=await r.json();missing.textContent=d.status==='PASS'?'Evidence đã có revision '+d.evidence_revision_id:'Thiếu: '+(d.missing_fields||[]).join(', ')}catch(e){missing.textContent='Không kiểm tra được evidence.'}form.onsubmit=async e=>{e.preventDefault();const f=new FormData(form),citation={source_id:f.get('source_id'),claim:f.get('claim'),rights_status:f.get('citation_rights')};if(!citation.source_id||!citation.claim||!citation.rights_status||!f.get('rights_status')){msg.className='err';msg.textContent='Cần nhập đủ citations và rights.';return}msg.className='muted';msg.textContent='Đang kiểm tra...';const r=await fetch('/api/reviews/'+id+'/evidence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({citations:[citation],rights_status:f.get('rights_status')})}),d=await r.json();msg.className=r.ok?'ok':'err';msg.textContent=r.ok?'Đã lưu evidence revision '+d.evidence_revision_id:(d.error||'Evidence bị chặn');if(r.ok) form.reset()}})();</script></section>'''.encode('utf-8')
@@ -1285,7 +1451,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         request_path = urlparse(getattr(self, "path", "")).path
-        if request_path == "/api/analytics/events" or request_path.startswith("/__issue39_test_admin__"):
+        if request_path in {"/login", "/api/auth/login", "/api/auth/logout", "/api/admin/credential-preflight", "/api/analytics/events"} or request_path.startswith("/__issue39_test_admin__"):
             return
         print(f"{self.address_string()} - {fmt % args}", flush=True)
 
@@ -2272,14 +2438,69 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc: self.send_json({"error": str(exc)}, 409 if str(exc) in {"STALE_REVIEW", "REVIEW_REJECTED", "REVIEW_ALREADY_APPROVED"} else 400); return True
         return False
 
-    def login_response(self, message: str = "") -> None:
-        body = login_page(message)
-        self.send_response(200)
+    def login_response(self, message: str = "", *, status: int = 200, pre_session_cookie: str = "") -> None:
+        cookie_value, token = LOGIN_PRESESSIONS.issue(pre_session_cookie)
+        body = login_page(message, token)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Set-Cookie", self.login_pre_session_cookie(cookie_value))
         self.end_headers()
         self.wfile.write(body)
+
+    def login_pre_session_cookie(self, value: str, max_age: int = LOGIN_PRESESSION_TTL) -> str:
+        secure = "; Secure" if SECURE_COOKIE else ""
+        return f"bmt_login_pre_session={value}; Max-Age={max_age}; HttpOnly; SameSite=Strict; Path=/{secure}"
+
+    def login_pre_session_value(self) -> str:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        morsel = cookie.get("bmt_login_pre_session")
+        return morsel.value if morsel else ""
+
+    def require_login_request_trust(self, raw: bytes) -> bool:
+        accepted, reason, details = login_header_diagnostics(self.headers)
+        cookie_value = self.login_pre_session_value()
+        if not self.remote_allowed():
+            reason = "REMOTE_DENIED"
+            details["rejection_reason"] = reason
+            AUTH_CORRELATION.record("browser_login", "/login", 403, reason, method="POST", details=details)
+            self.login_response("Nguồn đăng nhập không được phép. Hãy tải lại trang đăng nhập.", status=403)
+            return False
+        if not self.require_security_config():
+            reason = "SECURITY_CONFIG"
+            details["rejection_reason"] = reason
+            AUTH_CORRELATION.record("browser_login", "/login", 503, reason, method="POST", details=details)
+            return False
+        if not accepted:
+            details["rejection_reason"] = reason
+            AUTH_CORRELATION.record("browser_login", "/login", 403, reason, method="POST", details=details)
+            self.login_response("Không thể xác minh nguồn gửi. Hãy tải lại trang đăng nhập và thử lại.", status=403)
+            return False
+        try:
+            form = parse_qs(raw.decode("utf-8", "strict"), keep_blank_values=True)
+        except UnicodeDecodeError:
+            form = {}
+        token = form.get("csrf_token", [""])[0]
+        csrf_state = LOGIN_PRESESSIONS.consume(cookie_value, token)
+        details["csrf_state"] = csrf_state
+        if csrf_state != "VALID":
+            LOGIN_PRESESSIONS.revoke(cookie_value)
+            reason = "CSRF_" + csrf_state
+            details["rejection_reason"] = reason
+            AUTH_CORRELATION.record("browser_login", "/login", 200, reason, method="POST", details=details)
+            self.login_response("Phiên đăng nhập đã hết hạn hoặc không hợp lệ. Hãy thử lại.")
+            return False
+        details["rejection_reason"] = "NONE"
+        self._login_pre_session_cookie = cookie_value
+        self._login_diagnostic_details = details
+        return True
 
     def session_cookie(self, value: str, max_age: int) -> str:
         secure = "; Secure" if SECURE_COOKIE else ""
@@ -2330,6 +2551,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self.require_security_config():
                 return
+            source_ok, source_reason, details = login_header_diagnostics(self.headers)
+            AUTH_CORRELATION.record("login_form", "/login", 200, source_reason if not source_ok else "NONE",
+                                    method="GET", details=details)
             self.login_response(); return
         if path == "/logout":
             if not self.require_trusted_origin():
@@ -2520,16 +2744,30 @@ class Handler(BaseHTTPRequestHandler):
             self.analytics_event_post()
             return
         length = int(self.headers.get("Content-Length", "0") or 0)
+        request_limit = 64 * 1024 if path == "/login" else MAX_BODY
         is_retry_request = re.fullmatch(r"/api/errors/([^/]+)/retry", path)
         bodyless_paths = {"/api/auth/logout", "/api/ai9/test-only"}
         bodyless_process = bool(re.fullmatch(r"/api/intakes/[^/]+/process", path))
         bodyless_copy_studio = bool(re.fullmatch(r"/api/copy-studio/preview/ai-run-[a-f0-9]+", path))
-        if (length <= 0 and not is_retry_request and path not in bodyless_paths and not bodyless_process and not bodyless_copy_studio) or length > MAX_BODY:
-            self.send_json({"error": "Request rỗng hoặc vượt giới hạn 50MB."}, 413)
+        if (length <= 0 and not is_retry_request and path not in bodyless_paths and not bodyless_process and not bodyless_copy_studio) or length > request_limit:
+            if path == "/login":
+                LOGIN_PRESESSIONS.revoke(self.login_pre_session_value())
+                self.login_response("Biểu mẫu đăng nhập không hợp lệ. Hãy tải lại trang.", status=413)
+            else:
+                self.send_json({"error": "Request rỗng hoặc vượt giới hạn 50MB."}, 413)
             return
-        if not self.require_trusted_origin():
-            return
-        raw = self.rfile.read(length)
+        if path == "/login":
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+                LOGIN_PRESESSIONS.revoke(self.login_pre_session_value())
+                self.login_response("Biểu mẫu đăng nhập không hợp lệ. Hãy tải lại trang.", status=415)
+                return
+            raw = self.rfile.read(length)
+            if not self.require_login_request_trust(raw):
+                return
+        else:
+            if path != "/api/analytics/events" and not self.require_trusted_origin():
+                return
+            raw = self.rfile.read(length)
         if path == "/api/admin/credential-preflight":
             if not self.require_auth():
                 return
@@ -2698,13 +2936,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"authenticated": False}, headers={"Set-Cookie": self.session_cookie("", 0)})
             return
         if path == "/login":
-            if not self.remote_allowed():
-                self.send_json({"error": "Nguồn truy cập không được phép."}, 403); return
-            form = parse_qs(raw.decode("utf-8", "replace"))
-            if not password_ok(form.get("password", [""])[0]):
-                self.login_response("Mật khẩu không đúng hoặc password file không sẵn sàng."); return
+            pre_session_cookie = getattr(self, "_login_pre_session_cookie", "")
+            form = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
+            passwords = form.get("password", [])
+            if len(passwords) != 1 or not password_ok(passwords[0]):
+                details = getattr(self, "_login_diagnostic_details", {})
+                details["rejection_reason"] = "PASSWORD_REJECTED"
+                AUTH_CORRELATION.record("browser_login", "/login", 200, "PASSWORD_REJECTED",
+                                        method="POST", details=details)
+                self.login_response("Mật khẩu không đúng. Vui lòng thử lại.", pre_session_cookie=pre_session_cookie); return
+            LOGIN_PRESESSIONS.revoke(pre_session_cookie)
             sid = secrets.token_urlsafe(32); SESSIONS[sid] = datetime.now(timezone.utc).timestamp() + SESSION_TTL; SESSION_OWNERS[sid] = os.environ.get("BMT_ADMIN_OWNER_ID", "owner").strip() or "owner"
-            self.send_response(303); self.send_header("Location", "/"); self.send_header("Set-Cookie", self.session_cookie(sid, SESSION_TTL)); self.end_headers(); return
+            details = getattr(self, "_login_diagnostic_details", {})
+            AUTH_CORRELATION.record("browser_login", "/login", 303, "PASS", method="POST", details=details)
+            self.send_response(303); self.send_header("Location", "/"); self.send_header("Set-Cookie", self.session_cookie(sid, SESSION_TTL)); self.send_header("Set-Cookie", self.login_pre_session_cookie("", 0)); self.send_header("Referrer-Policy", "strict-origin-when-cross-origin"); self.end_headers(); return
         if not self.require_auth():
             return
         one_touch_match = re.fullmatch(r"/api/intakes/([^/]+)/create-content", path)
