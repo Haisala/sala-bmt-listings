@@ -48,6 +48,17 @@ def main() -> None:
     assert rental["facts"]["price_vnd_per_month"] == 6_000_000
     assert rental["facts"]["price_cycle"] == "MONTH"
 
+    labeled = extract_source_facts(
+        "Bán biệt thự EcoCity. Diện tích đất: 250 m², diện tích xây dựng: 400 m². "
+        "Giá bán 16,5 tỷ; giá tham khảo 16,5 tỷ.",
+        intake_id="TEST_ONLY-labeled",
+    )
+    assert labeled["facts"]["land_area"] == 250
+    assert labeled["facts"]["construction_area"] == 400
+    assert labeled["facts"]["area"] == "250 m²"
+    assert labeled["facts"]["price_vnd"] == 16_500_000_000
+    assert labeled["conflicts"] == []
+
     conflict = extract_source_facts(
         "Bán hay cho thuê căn hộ; diện tích 70 m² hoặc 80 m²; giá 2 tỷ hoặc 3 tỷ",
         intake_id="TEST_ONLY-conflict",

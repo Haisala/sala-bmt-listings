@@ -121,9 +121,9 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
         except InvalidOperation:
             continue
         context = folded[max(0, match.start() - 36):match.start()]
-        if re.search(r"(xay dung|san xay|dien tich xay|construction)\s*$", context):
+        if re.search(r"(xay dung|san xay|dien tich xay|construction)\s*[:=-]?\s*$", context):
             field = "construction_area"
-        elif re.search(r"(dat|khuon vien|dien tich dat|tho cu)\s*$", context):
+        elif re.search(r"(dat(?: nen)?|khuon vien|dien tich dat|tho cu)\s*[:=-]?\s*$", context):
             field = "land_area"
         else:
             field = "area"
@@ -164,15 +164,22 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
     sale = "SALE" in transaction_values
     rent = "RENT" in transaction_values
     monthly = bool(re.search(r"/\s*thang|moi\s*thang|hang\s*thang|per\s*month", folded))
-    if len(amounts) == 1 or compound_amount:
+    parsed_amounts: list[tuple[int, re.Match[str]]] = []
+    for amount_match in amounts:
+        try:
+            factor = 1_000_000_000 if amount_match.group(2) in {"ty", "ti"} else 1_000_000 if amount_match.group(2) in {"trieu", "tr"} else 1_000
+            parsed_amounts.append((int(Decimal(amount_match.group(1).replace(",", ".")) * Decimal(factor)), amount_match))
+        except InvalidOperation:
+            continue
+    distinct_amounts = {amount for amount, _ in parsed_amounts}
+    if len(distinct_amounts) == 1 or compound_amount:
         match = amounts[0]
         try:
             if compound_amount:
                 amount, amount_span = compound_amount
             else:
-                value = Decimal(match.group(1).replace(",", "."))
-                multiplier = Decimal(1_000_000_000 if match.group(2) in {"ty", "ti"} else 1_000_000 if match.group(2) in {"trieu", "tr"} else 1_000)
-                amount, amount_span = int(value * multiplier), match.span()
+                amount = parsed_amounts[0][0]
+                amount_span = (parsed_amounts[0][1].start(), parsed_amounts[-1][1].end())
             if rent or monthly:
                 put("transaction_type", "RENT", amount_span) if not transaction_values else None
                 put("price_vnd_per_month", amount, amount_span)
@@ -181,7 +188,7 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
                 put("price_vnd", amount, amount_span)
         except InvalidOperation:
             pass
-    elif len(amounts) > 1:
+    elif len(distinct_amounts) > 1:
         conflicts.append({"field": "price_vnd_per_month" if rent or monthly else "price_vnd", "kind": "SOURCE_CONFLICT", "candidates": [m.group(0) for m in amounts], "evidence": [_source_span(text, offsets, *m.span())[0] for m in amounts]})
 
     for field, pattern in (("bedrooms", r"(\d+)\s*(?:phong ngu|bedrooms?)"), ("bathrooms", r"(\d+)\s*(?:wc|phong tam|bathrooms?)")):
