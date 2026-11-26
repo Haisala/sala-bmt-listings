@@ -476,7 +476,32 @@ def main() -> None:
             else: os.environ[key] = value
         adm.SECURE_COOKIE, adm.ALLOWED_REMOTE_IP = saved_secure_cookie, saved_allowlist
 
-        print("PUBLIC_RELEASE_ADMIN_PASS: Owner session + CSRF/origin, Gate A/review/Core revision binding, replay, rights fail-closed, private Website preview, revision refresh/revoke/rollback, unchanged canonical state, responsive Admin controls, TEST_ONLY cleanup removes intake index and private media/review")
+        # The Owner UI must start closed, replace stale duplicate panels, and
+        # bind enablement only to the server's complete publication snapshot.
+        ui = adm.PUBLIC_RELEASE_UI.decode("utf-8")
+        assert "data-release-approve disabled" in ui
+        assert "detail.querySelectorAll('#public-release').forEach(existing=>existing.remove())" in ui
+        assert "const canApprove=data.can_approve===true;approve.disabled=!canApprove" in ui
+        assert "'Chưa thể đăng: '+blockedReason" in ui
+        assert "approve.setAttribute('aria-disabled',String(!canApprove))" in ui
+        package_record["state"] = "EDITED"
+        package_record["review_revision"] = int(package_record["review_revision"]) + 1
+        center._persist(package_record)
+        with store.connection:
+            store.connection.execute("DELETE FROM rights_refs WHERE rights_id = ?", ("TEST_ONLY-preview-rights",))
+            store.connection.execute("DELETE FROM property_media_history WHERE event_id = ?", ("TEST_ONLY-confirm-preview-media",))
+        edited = adm._public_release_snapshot(center, review_id)
+        assert edited["gate_a_state"] == "EDITED" and edited["media_summary"]["eligible"] == 0
+        assert {"GATE_A_APPROVAL_REQUIRED", "PUBLIC_MEDIA_RIGHTS_DENIED"}.issubset(set(edited["blockers"])), edited
+        assert edited["can_approve"] is False and edited["confirmation_preview"] is None
+        handler, edited_http = make_handler(adm, f"/api/reviews/{review_id}/public-release", method="GET")
+        handler.do_GET()
+        assert edited_http["status"] == 200
+        assert edited_http["value"]["gate_a_state"] == "EDITED"
+        assert edited_http["value"]["media_summary"]["eligible"] == 0
+        assert edited_http["value"]["can_approve"] is False
+
+        print("PUBLIC_RELEASE_ADMIN_PASS: Owner session + CSRF/origin, Gate A/review/Core revision binding, replay, rights fail-closed, private Website preview, revision refresh/revoke/rollback, unchanged canonical state, TEST_ONLY EDITED/zero-eligible HTTP guard, UI duplicate/initial-disabled/authoritative-state assertions, TEST_ONLY cleanup removes intake index and private media/review")
 
 
 if __name__ == "__main__":
