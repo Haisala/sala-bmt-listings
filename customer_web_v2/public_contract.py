@@ -7,7 +7,7 @@ from typing import Any
 REQUIRED = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights"}
 STATUSES = {"Đang bán", "Đang cho thuê", "Đã cho thuê", "Đã cọc", "Đã bán"}
 PRIVATE_KEYS = {"internal_analysis", "candidate", "source_bundle", "owner_contact", "credentials", "private_media_path", "rights_evidence"}
-ALLOWED_FIELDS = {"id", "slug", "title", "status", "price", "features", "images", "updatedAt", "category", "propertyType", "addressText", "areas", "transactionType", "priceLabel", "priceNote", "priceUnit", "area", "dimensions", "width", "length", "landArea", "legal", "road", "description", "videos", "reelUrl", "createdAt", "locationNotes", "featured", "goodPrice", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights", "contentBatchId", "contentVariantId", "contentRevision"}
+ALLOWED_FIELDS = {"id", "listingId", "slug", "title", "status", "price", "features", "images", "updatedAt", "category", "propertyType", "addressText", "areas", "transactionType", "priceLabel", "priceNote", "priceUnit", "area", "dimensions", "width", "length", "landArea", "legal", "road", "description", "videos", "reelUrl", "createdAt", "locationNotes", "featured", "goodPrice", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt", "sourceSystem", "publicationStatus", "publicationRevision", "publicationApprovedAt", "mediaRights", "contentBatchId", "contentVariantId", "contentRevision"}
 
 
 class PublicContractError(ValueError):
@@ -24,6 +24,8 @@ def validate_public_dto(dto: dict[str, Any]) -> dict[str, Any]:
         raise PublicContractError("PUBLICATION_ID_INVALID")
     if dto["sourceSystem"] != "SALA_PROPERTY_CORE":
         raise PublicContractError("PUBLIC_SOURCE_REQUIRED")
+    if "listingId" in dto and not re.fullmatch(r"listing-[a-f0-9]{24}", str(dto["listingId"])):
+        raise PublicContractError("PUBLIC_LISTING_ID_INVALID")
     if (dto["publicationStatus"] != "APPROVED"
             or int(dto["publicationRevision"]) != int(dto["propertyRevision"])
             or not isinstance(dto["publicationApprovedAt"], str)

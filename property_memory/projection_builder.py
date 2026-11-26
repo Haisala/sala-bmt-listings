@@ -20,7 +20,7 @@ from .store import PropertyStore, is_publishable_by_rights
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_FIELDS = frozenset({
-    "id", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt",
+    "id", "listingId", "propertyId", "propertyRevision", "projectionId", "publicationId", "projectionGeneratedAt",
     "slug", "title", "category", "propertyType", "addressText", "status", "price",
     "priceLabel", "priceNote", "area", "dimensions", "width", "length", "landArea",
     "legal", "road", "features", "description", "images", "videos", "reelUrl",
@@ -165,8 +165,14 @@ def _dto(store: PropertyStore, prop: dict[str, Any], release: dict[str, Any], pu
         raise ProjectionError("PUBLIC_STATUS_UNSUPPORTED")
     features = prop.get("features") if isinstance(prop.get("features"), list) else []
     media = _public_media(store, prop["property_id"], public_slug)
+    # Stable Customer Web identity: title/slug and approved content may change,
+    # while this listing remains the same canonical Property Core transaction.
+    listing_id = "listing-" + hashlib.sha256(
+        f"{prop['property_id']}:{'RENT' if is_rent else 'SALE'}".encode("utf-8")
+    ).hexdigest()[:24]
     dto = {
         "id": public_slug, "propertyId": prop["property_id"], "propertyRevision": revision,
+        "listingId": listing_id,
         "projectionId": projection_id, "publicationId": release.get("publication_id") or public_release_id(release),
         "projectionGeneratedAt": generated_at,
         "sourceSystem": "SALA_PROPERTY_CORE", "publicationStatus": "APPROVED",

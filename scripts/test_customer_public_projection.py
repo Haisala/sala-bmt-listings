@@ -144,6 +144,7 @@ class CustomerProjectionIntegrationTests(unittest.TestCase):
         listing = rows[0]
         self.assertEqual(listing["property_id"], dto["propertyId"])
         self.assertEqual(listing["property_revision"], dto["propertyRevision"])
+        self.assertEqual(listing["listing_id"], dto["listingId"])
         self.assertEqual(listing["projection_id"], dto["projectionId"])
         self.assertEqual(listing["publication_id"], dto["publicationId"])
         self.assertEqual(listing["publication_revision"], dto["publicationRevision"])
@@ -156,6 +157,11 @@ class CustomerProjectionIntegrationTests(unittest.TestCase):
         media_id = detail_obj["media"][0]["media_id"]
         media = self.app.handle("GET", "/media/" + media_id)
         self.assertEqual((media.status, media.body), (200, PNG))
+        direct = self.app.handle("GET", "/tin/" + listing["listing_id"])
+        self.assertEqual(direct.status, 200)
+        self.assertEqual(direct.headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertIn(b"/app.js", direct.body)
+        self.assertEqual(self.app.handle("GET", "/tin/listing-000000000000000000000000").status, 404)
 
     def test_stale_revision_cleanup_revoke_and_no_duplicate_on_replay_or_update(self):
         self._publish_fixture()
@@ -180,8 +186,10 @@ class CustomerProjectionIntegrationTests(unittest.TestCase):
         newer = build_public_projection(self.store, self.property_id, self.projection_path)["projection"]
         write_staging_web_artifact(newer, self.web_path)
         self.assertEqual(newer["propertyRevision"], 2)
+        self.assertEqual(newer["listingId"], first["listingId"], "shareable identity must survive an approved revision")
         self.assertEqual(len(json.loads(self.web_path.read_text(encoding="utf-8"))), 1)
         self.assertEqual(json.loads(self.app.handle("GET", "/api/listings").body)["items"][0]["property_revision"], 2)
+        self.assertEqual(self.app.handle("GET", "/tin/" + newer["listingId"]).status, 200)
 
         # (e) Revoke withdraws the projection and media lookup fails closed.
         self.center.record_public_release(
@@ -192,6 +200,7 @@ class CustomerProjectionIntegrationTests(unittest.TestCase):
         admin_server._withdraw_private_preview(self.property_id)
         self.assertEqual(json.loads(self.web_path.read_text(encoding="utf-8")), [])
         self.assertEqual(json.loads(self.app.handle("GET", "/api/listings").body)["items"], [])
+        self.assertEqual(self.app.handle("GET", "/tin/" + newer["listingId"]).status, 404)
         self.assertEqual(self.app.handle("GET", "/media/" + PublicMediaId(newer, newer["images"][0])).status, 404)
 
     def test_invalid_rights_private_fields_duplicates_and_missing_source_fail_closed(self):

@@ -128,7 +128,7 @@ class PublicProjectionReader:
                 continue
             media.append({"media_id": self._media_id(dto, ref), "mime": asset[1]})
         return {
-            "listing_id": dto["id"], "property_id": dto["propertyId"],
+            "listing_id": dto.get("listingId") or dto["id"], "property_id": dto["propertyId"],
             "property_revision": int(dto["propertyRevision"]), "projection_id": dto["projectionId"],
             "publication_id": dto["publicationId"],
             "publication_revision": int(dto["publicationRevision"]),

@@ -484,6 +484,11 @@ def main() -> None:
         assert "const canApprove=data.can_approve===true;approve.disabled=!canApprove" in ui
         assert "'Chưa thể đăng: '+blockedReason" in ui
         assert "approve.setAttribute('aria-disabled',String(!canApprove))" in ui
+        assert "data-customer-public-view" in ui and "Xem tin trên Website" in ui
+        assert "data-customer-public-copy" in ui and "Sao chép link" in ui
+        assert "navigator.clipboard.writeText(value)" in ui and "field.value=value" in ui
+        assert "verifiedLink&&verifiedLink.verified&&verifiedLink.public_url" in ui
+        assert "Không sao chép được. Hãy mở link rồi sao chép từ thanh địa chỉ." in ui
         package_record["state"] = "EDITED"
         package_record["review_revision"] = int(package_record["review_revision"]) + 1
         center._persist(package_record)

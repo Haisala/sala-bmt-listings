@@ -20,7 +20,7 @@ function render(items) {
     else media.textContent = "SALA BĐS";
     const body = make("div", "card-body"); body.append(make("p", "eyebrow", `${item.transaction_type === "RENT" ? "CHO THUÊ" : "MUA BÁN"} · ${item.property_type}`));
     body.append(make("h3", "", item.title), make("p", "", item.location), make("p", "price", formatPrice(item.price_vnd, item.transaction_type)), make("p", "", `${item.area_m2} m²`));
-    const open = make("button", "open-detail", "Xem chi tiết"); open.type = "button"; open.addEventListener("click", () => showDetail(item.listing_id)); body.append(open); card.append(media, body); feed.append(card);
+    const open = make("a", "open-detail", "Xem chi tiết"); open.href = `/tin/${encodeURIComponent(item.listing_id)}`; body.append(open); card.append(media, body); feed.append(card);
   }
 }
 async function load() {
@@ -30,4 +30,6 @@ async function showDetail(id) {
   try { const r = await fetch(`/api/listings/${encodeURIComponent(id)}`, {credentials:"same-origin"}); if (!r.ok) throw new Error(); const item = await r.json(); track("page_view",{page_type:"listing_detail",property_id:item.property_id,publication_id:item.publication_id});track("property_detail_view",{property_id:item.property_id,publication_id:item.publication_id});detail.replaceChildren(); detail.classList.remove("hidden"); const box=make("article","detail-card"), gallery=make("div","gallery"); for(const media of item.media||[]){const img=document.createElement("img");img.src=`/media/${encodeURIComponent(media.media_id)}`;img.alt=item.title;gallery.append(img);} box.append(gallery,make("p","eyebrow",`${item.transaction_type} · ${item.property_type}`),make("h2","",item.title),make("p","price",formatPrice(item.price_vnd,item.transaction_type)),make("p","",`${item.area_m2} m² · ${item.location}`),make("p","",item.description)); const cta=make("button","open-detail","Liên hệ chưa cấu hình"); cta.type="button"; cta.disabled=true; cta.setAttribute("aria-disabled","true"); const message=make("p","notice","Chưa có số điện thoại, Zalo hoặc liên kết liên hệ công khai được Owner xác nhận."); message.id="detail-message"; box.append(cta,message); detail.append(box); detail.scrollIntoView({behavior:"smooth",block:"start"}); } catch { notice.textContent="Không tìm thấy tin đã duyệt."; }
 }
 $("#search-button").addEventListener("click",()=>{const type=$("#search").value.trim()?"query_used":"transaction", value=type==="query_used"?"yes":($("#transaction").value==="RENT"?"rent":"sale");track("search_filter",{filter_type:type,filter_value:value});load();}); $("#search").addEventListener("keydown",e=>{if(e.key==="Enter")$("#search-button").click();}); $("#transaction").addEventListener("change",()=>{$("#search-button").click();}); $("#sort").addEventListener("change",load);
-track("page_view",{page_type:"home"});load();
+const directMatch=location.pathname.match(/^\/tin\/([A-Za-z0-9-]{1,128})$/);
+if(directMatch){document.querySelector(".hero")?.classList.add("hidden");document.querySelector(".feed-section")?.classList.add("hidden");showDetail(directMatch[1]);track("page_view",{page_type:"listing_detail"});}
+else {track("page_view",{page_type:"home"});load();}

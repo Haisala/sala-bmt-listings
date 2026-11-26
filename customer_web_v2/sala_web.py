@@ -557,6 +557,20 @@ class Application:
             except OSError:
                 return self._json_response(503, {"error": "Frontend asset missing"})
             return self._response(200, data, mime, {"Cache-Control": "no-cache"})
+        direct_listing = re.fullmatch(r"/tin/([A-Za-z0-9-]{1,128})", path)
+        if method == "GET" and direct_listing:
+            try:
+                # Resolve from the current approved projection on every direct
+                # open; stale, revoked and unknown links fail closed.
+                if self.public_read_model.get_listing(direct_listing.group(1)) is None:
+                    return self._json_response(404, {"error": "Listing not found"})
+                try:
+                    page = (self.frontend / "index.html").read_bytes()
+                except OSError:
+                    return self._json_response(503, {"error": "Frontend asset missing"})
+                return self._response(200, page, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+            except ProjectionUnavailable as exc:
+                return self._json_response(503, {"error": str(exc)})
         if method == "GET" and path == "/api/listings":
             try:
                 return self._json_response(200, {"items": self.public_read_model.list_listings(query)})
