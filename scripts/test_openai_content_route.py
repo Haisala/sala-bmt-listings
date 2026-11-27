@@ -95,6 +95,7 @@ def main():
       assert result["status"]==201,result
       body=result["value"]
       assert len(body["variants"])==5 and body["published"] is False and body["mutated_property_store"] is False
+      assert body["provider_calls"]==1 and body["dispatch_started"] is True
       assert intake["status"]=="CONTENT_CREATED" and intake["contentReviewId"]==body["review_id"]
       assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
       assert len(center.packages[body["review_id"]]["candidate"]["media"])==10
@@ -470,6 +471,74 @@ def main():
       value="TEST_ONLY Owner choice",owner_id="owner")
     assert conflict_confirmed["candidate"]["conflicts"]==[]
     assert conflict_confirmed["owner_edits"][-1]["origin"]=="OWNER_CONFIRMED"
+    legacy_attempt={"status":"BLOCKED","input_revision":2,"response":{"error":"CONTENT_PREREQUISITES_REQUIRED",
+      "blockers":["SOURCE_CONFLICTS_REQUIRE_OWNER_REVIEW"],"provider_calls":0}}
+    assert admin.content_request_dispatch_state(legacy_attempt) is False
+    assert admin.content_request_dispatch_state({"status":"BLOCKED","response":{"error":"OTHER","provider_calls":0}}) is None
+    conflict_content={"id":"TEST_ONLY-intake-conflicting-fact","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-conflicting-fact",
+      "sourcePrefillVersion":2,"inputRevision":1,"note":"TEST_ONLY synthetic source: measured 10 x 25 m; area values conflict.",
+      "preliminaryFacts":{"title":"TEST_ONLY Sample home","property_type":"HOUSE","transaction_type":"SALE",
+        "price_vnd":2100000000,"address":"TEST_ONLY Example Road","area":"72 m²","house_type":"TEST_ONLY house",
+        "bedrooms":3,"bathrooms":2},
+      "factProvenance":{},
+      "conflicts":[{"field":"area","kind":"SOURCE_CONFLICT","current_value":"72 m²","source_value":"10 x 25 m"}],
+      "ownerEvidence":{"source_id":"TEST_ONLY-area-source","claim":"TEST_ONLY synthetic rights evidence","rights_status":"PERSONAL"},"media":[]}
+    records.append(conflict_content)
+    conflict_review=process_intake(store,center,conflict_content,ai_gateway=None,operation_id=conflict_content["id"])
+    conflict_review=center.packages[conflict_review["review_id"]]
+    conflict_provider=Provider(normalized_facts=[])
+    properties_before_conflict_content=len(store.list_properties())
+    with patch.dict(os.environ,{"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":folder,"BMT_ADMIN_OWNER_ID":"owner"}), \
+         patch.object(admin,"HOST","127.0.0.1"),patch.object(admin,"_CONTENT_LIVE_ENABLED",True), \
+         patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"INBOX_ROOT",inbox), \
+         patch.object(admin,"_AI_PROVIDER",conflict_provider),patch.object(admin,"_USAGE_LEDGER",Usage()), \
+         patch.object(admin,"load_index",lambda:records),patch.object(admin,"save_index",lambda items:None):
+      conflict_drafts=call(handler,conflict_content["id"],"TEST_ONLY-conflicting-facts-content-001")
+    assert conflict_drafts["status"]==201 and len(conflict_drafts["value"]["variants"])==5,conflict_drafts
+    assert "area" in conflict_provider.last_payload["blocked_fields"]
+    assert "area" not in conflict_provider.last_payload["facts"]
+    saved_conflict=center.packages[conflict_drafts["value"]["review_id"]]
+    assert saved_conflict["candidate"]["facts"]["area"]=="72 m²"
+    assert saved_conflict["candidate"]["conflicts"][0]["field"]=="area"
+    assert "area" in saved_conflict["content_batches"][-1]["conflicts"]
+    assert saved_conflict["state"]!="APPROVED" and len(store.list_properties())==properties_before_conflict_content
+    legacy_intake={"id":"TEST_ONLY-intake-legacy-block-r3","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-legacy",
+      "sourcePrefillVersion":2,"inputRevision":3,"note":"TEST_ONLY source with area conflict",
+      "preliminaryFacts":{"title":"TEST_ONLY legacy home","property_type":"APARTMENT","transaction_type":"SALE",
+        "price_vnd":1200000000,"address":"TEST_ONLY Road","area":"62 m²"},
+      "conflicts":[{"field":"area","current_value":"62 m²","source_value":"10 x 25 m"}],
+      "ownerEvidence":{"source_id":"TEST_ONLY-legacy-source","claim":"TEST_ONLY legacy source","rights_status":"PERSONAL"},"media":[]}
+    records.append(legacy_intake)
+    legacy_package=process_intake(store,center,legacy_intake,ai_gateway=None,operation_id=legacy_intake["id"])
+    legacy_package=center.packages[legacy_package["review_id"]]
+    legacy_package.setdefault("content_generation_requests",[]).append({"idempotency_key":"TEST_ONLY-old-rev2-key",
+      "status":"BLOCKED","input_revision":2,"response":{"error":"CONTENT_PREREQUISITES_REQUIRED",
+      "blockers":["SOURCE_CONFLICTS_REQUIRE_OWNER_REVIEW"],"provider_calls":0}})
+    center._persist(legacy_package)
+    legacy_provider=Provider();properties_before_legacy=len(store.list_properties())
+    with patch.dict(os.environ,{"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":folder,"BMT_ADMIN_OWNER_ID":"owner"}), \
+         patch.object(admin,"HOST","127.0.0.1"),patch.object(admin,"_CONTENT_LIVE_ENABLED",True), \
+         patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"INBOX_ROOT",inbox), \
+         patch.object(admin,"_AI_PROVIDER",legacy_provider),patch.object(admin,"_USAGE_LEDGER",Usage()), \
+         patch.object(admin,"load_index",lambda:records),patch.object(admin,"save_index",lambda items:None):
+      legacy_result=call(handler,legacy_intake["id"],"TEST_ONLY-legacy-revision3-continuation")
+    assert legacy_result["status"]==201 and len(legacy_result["value"]["variants"])==5,legacy_result
+    assert legacy_provider.calls==1 and "area" in legacy_provider.last_payload["blocked_fields"]
+    assert len(store.list_properties())==properties_before_legacy
+    empty_source={"id":"TEST_ONLY-intake-empty-source","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-empty-source",
+      "sourcePrefillVersion":2,"note":"","preliminaryFacts":{},"ownerEvidence":{"source_id":"TEST_ONLY-empty",
+      "claim":"TEST_ONLY empty synthetic source","rights_status":"PERSONAL"},"media":[]}
+    records.append(empty_source)
+    empty_provider=Provider()
+    with patch.dict(os.environ,{"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":folder,"BMT_ADMIN_OWNER_ID":"owner"}), \
+         patch.object(admin,"HOST","127.0.0.1"),patch.object(admin,"_CONTENT_LIVE_ENABLED",True), \
+         patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"INBOX_ROOT",inbox), \
+         patch.object(admin,"_AI_PROVIDER",empty_provider),patch.object(admin,"_USAGE_LEDGER",Usage()), \
+         patch.object(admin,"load_index",lambda:records),patch.object(admin,"save_index",lambda items:None):
+      empty_result=call(handler,empty_source["id"],"TEST_ONLY-empty-source-no-dispatch")
+    assert empty_result["status"]==409 and empty_result["value"]["error"]=="CONTENT_PREREQUISITES_REQUIRED"
+    assert empty_result["value"]["provider_calls"]==0 and empty_result["value"]["dispatch_started"] is False
+    assert empty_provider.calls==0
     ui=Path(__file__).resolve().parents[1]/"admin"/"intake_workflow_ui.py"
     ui_text=ui.read_text(encoding="utf-8")
     assert "approve.disabled=approve.disabled||(hasVariants&&!selected)" not in ui_text

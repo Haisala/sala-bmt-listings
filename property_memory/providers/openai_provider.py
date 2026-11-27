@@ -127,15 +127,22 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
     facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
     source_text = payload.get("source_text")
+    blocked_fields = payload.get("blocked_fields", [])
+    if (not isinstance(blocked_fields, list) or not all(isinstance(field, str)
+            and field in CONTENT_NORMALIZED_FACT_FIELDS for field in blocked_fields)):
+        raise ValueError("CONTENT_INPUT_INVALID")
+    blocked_fields = sorted(set(blocked_fields))
     if source_text is not None and (not isinstance(source_text, str) or len(source_text) > 3200):
         raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
     if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
         raise ValueError("CONTENT_INPUT_REQUIRED")
-    instructions = "Từ source_text, trích fact có bằng chứng vào f=[field,raw,normalized,evidence], dẫn nguyên văn; m=thiếu,c=mâu thuẫn. Không đoán. Dùng facts và f không xung đột tạo đúng 5 bài ngắn tiếng Việt khác nhau; v.f chỉ field dùng. Không gửi ảnh, không suy diễn pháp lý/liên hệ/quyền đăng."
+    instructions = "Trích fact có bằng chứng từ source_text vào f=[field,raw,normalized,evidence], dẫn nguyên văn; m=thiếu,c=mâu thuẫn. Không đoán. Dùng facts/f không xung đột tạo đúng 5 bài ngắn khác nhau; v.f chỉ field dùng. Không dùng blocked_fields; nêu thiếu/chưa chắc trong unknowns. Không gửi ảnh, không suy diễn pháp lý/liên hệ/quyền đăng."
     def compose(selected_facts: dict[str, Any], include_source: bool = False) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
         allowed = {"facts": selected_facts}
+        if blocked_fields:
+            allowed["blocked_fields"] = blocked_fields
         if include_source and isinstance(source_text, str) and source_text.strip():
             allowed["source_text"] = source_text
         schema = json.loads(json.dumps(CONTENT_RESPONSE_SCHEMA))
@@ -314,13 +321,14 @@ class OpenAIPropertyProvider:
         except ProviderError as exc:
             exc.diagnostics.update(_safe_response_diagnostics(response))
             exc.diagnostics.setdefault("model", self.model)
+            exc.dispatch_started = True
             raise
         if "v" in value:
             raw_facts = value.get("f", [])
             if (not isinstance(raw_facts, list) or len(raw_facts) > 12
                     or any(not isinstance(item, list) or len(item) != 4
                            or not all(isinstance(part, str) for part in item) for item in raw_facts)):
-                raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider fact proposals were malformed")
+                raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider fact proposals were malformed", dispatch_started=True)
             value = {"variants": [{"variant_index": x.get("i"), "title": x.get("t"), "body": x.get("b"),
                                     "facts_used": x.get("f"), "citations_used": [], "unknowns": x.get("u"),
                                     "warnings": x.get("w")} for x in value.get("v", []) if isinstance(x, dict)],
@@ -333,9 +341,9 @@ class OpenAIPropertyProvider:
         if (not isinstance(variants, list) or len(variants) != CONTENT_VARIANT_COUNT
                 or any(type(index) is not int for index in indices)
                 or sorted(indices) != list(range(1, CONTENT_VARIANT_COUNT + 1))):
-            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly five indexed variants")
+            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content output was not exactly five indexed variants", dispatch_started=True)
         if not isinstance(value.get("normalized_facts"), list) or not isinstance(value.get("missing_fields"), list) or not isinstance(value.get("conflicts"), list):
-            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content response omitted normalized-facts fields")
+            raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider content response omitted normalized-facts fields", dispatch_started=True)
         value["usage"] = response.get("usage") if isinstance(response.get("usage"), dict) else None
         value["provider_request_id"] = response.get("id") if isinstance(response.get("id"), str) else None
         value["metadata"] = {"provider": self.provider_name, "model": self.model, "prompt_version": CONTENT_PROMPT_VERSION}

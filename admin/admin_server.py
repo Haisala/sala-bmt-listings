@@ -1478,11 +1478,12 @@ def project_intake_admin_list_item(record: dict[str, Any], center: ReviewCenter 
                 provider_calls = int(response.get("provider_calls") or 0)
             except (TypeError, ValueError):
                 provider_calls = 0
-            if latest.get("status") == "IN_PROGRESS" or provider_calls > 0 or response.get("dispatch_started") is True:
+            dispatch_state = content_request_dispatch_state(latest)
+            if dispatch_state is True:
                 item["contentAttemptState"] = "OUTCOME_UNVERIFIED"
             elif latest.get("status") == "SUCCEEDED":
                 item["contentAttemptState"] = "SUCCEEDED"
-            elif response.get("dispatch_started") is False and response.get("error") in CONTENT_SAFE_PREFLIGHT_ERRORS:
+            elif dispatch_state is False and response.get("error") in CONTENT_SAFE_PREFLIGHT_ERRORS:
                 item["contentAttemptState"] = "SAFE_PREFLIGHT_FAILURE"
             elif latest.get("status") == "BLOCKED":
                 item["contentAttemptState"] = "BLOCKED_NO_PROVIDER"
@@ -1496,6 +1497,32 @@ def project_intake_admin_list_item(record: dict[str, Any], center: ReviewCenter 
 CONTENT_CONSENT_DESTINATION = "OPENAI_PRIVATE_CONTENT_DRAFT"
 CONTENT_CONSENT_VERSION = 1
 CONTENT_SAFE_PREFLIGHT_ERRORS = {"CONTENT_INPUT_LIMIT_EXCEEDED", "CONTENT_COST_CAP_EXCEEDED"}
+LEGACY_PROVEN_LOCAL_BLOCKERS = {"SOURCE_CONFLICTS_REQUIRE_OWNER_REVIEW"}
+
+
+def content_request_dispatch_state(entry: dict[str, Any] | None) -> bool | None:
+    """Return dispatch state only when explicit or proven by a known local block."""
+    if not isinstance(entry, dict):
+        return None
+    response = entry.get("response") if isinstance(entry.get("response"), dict) else {}
+    try:
+        calls = max(0, int(response.get("provider_calls") or 0))
+    except (TypeError, ValueError):
+        calls = 0
+    if response.get("dispatch_started") is False and calls == 0:
+        return False
+    if response.get("dispatch_started") is True or calls > 0 or entry.get("status") == "IN_PROGRESS":
+        return True
+    # Historical records from the old conflict gate omitted dispatch_started.
+    # This exact BLOCKED shape is created before build_generative_content_batch;
+    # require zero provider calls and no receipt/request ID before reconciling.
+    blockers = response.get("blockers")
+    no_receipt = not response.get("receipt") and not response.get("request_id") and not response.get("provider_request_id")
+    if (entry.get("status") == "BLOCKED" and calls == 0 and no_receipt
+            and response.get("error") == "CONTENT_PREREQUISITES_REQUIRED"
+            and isinstance(blockers, list) and set(blockers) == LEGACY_PROVEN_LOCAL_BLOCKERS):
+        return False
+    return None
 
 
 def content_consent_scope(record: dict[str, Any], model: str) -> str:
@@ -1545,13 +1572,14 @@ def content_attempt_status(intake_id: str, record: dict[str, Any], center: Revie
     except (TypeError, ValueError):
         provider_calls = 0
     consent = reusable_content_consent(package, record, _AI_PROVIDER.model)
+    dispatch_state = content_request_dispatch_state(latest)
     if not latest:
         state, error, can_retry = "NO_ATTEMPT", None, False
     elif latest.get("status") == "SUCCEEDED":
         state, error, can_retry = "SUCCEEDED", None, False
-    elif latest.get("status") == "IN_PROGRESS" or provider_calls > 0 or response.get("dispatch_started") is True:
+    elif dispatch_state is True:
         state, error, can_retry = "OUTCOME_UNVERIFIED", "CONTENT_REQUEST_OUTCOME_UNKNOWN", False
-    elif response.get("dispatch_started") is not False:
+    elif dispatch_state is not False:
         state, error, can_retry = "OUTCOME_UNVERIFIED", "CONTENT_REQUEST_OUTCOME_UNKNOWN", False
     else:
         error = response.get("error") if isinstance(response.get("error"), str) else None
@@ -1570,7 +1598,7 @@ def content_attempt_status(intake_id: str, record: dict[str, Any], center: Revie
                          and latest.get("input_revision") == int(record.get("inputRevision", 1)))
         state = "SAFE_RETRY_AVAILABLE" if can_retry else ("RETRY_LIMIT_REACHED" if len(safe_failures) >= 2 else "BLOCKED")
     return {"intake_id": intake_id, "review_id": package.get("review_id"), "state": state,
-            "error": error, "provider_calls": provider_calls, "dispatch_started": response.get("dispatch_started"),
+            "error": error, "provider_calls": provider_calls, "dispatch_started": dispatch_state,
             "input_revision": int(record.get("inputRevision", 1)), "can_retry": can_retry, "consent": consent,
             "content_batch_count": len(package.get("content_batches", []))}
 
@@ -1782,7 +1810,7 @@ CONTENT_STUDIO_UI = '''<script>
     for(const batch of visibleContentBatches){
       const head=document.createElement('p');head.className='muted';const g=batch.generation||{},u=g.usage||{};
       head.textContent=`${batch.status||'PRIVATE_DRAFT'} · ${batch.content_batch_id} · facts ${batch.facts_revision_id} · ${g.model||''} · ${u.input_tokens??'—'}/${u.output_tokens??'—'} tokens · ${g.request_id||'—'} · est. ${g.estimated_cost_usd??'—'} USD · media ${batch.media_analysis||'NOT_SENT'}`;cards.append(head);
-      if((batch.normalized_facts||[]).length){const f=document.createElement('p');f.className='muted';f.textContent='Facts trích từ nguồn (chưa Owner xác nhận): '+batch.normalized_facts.map(x=>x.field+'='+x.normalized_value+' ['+x.evidence+']').join(' · ');cards.append(f)}
+      if((batch.normalized_facts||[]).length){const f=document.createElement('p');f.className='muted';f.textContent='Facts trích từ nguồn (chưa Owner xác nhận): '+batch.normalized_facts.map(x=>x.field+'='+x.normalized_value+' ['+x.evidence+']').join(' · ');cards.append(f)}if((batch.missing_fields||[]).length){const m=document.createElement('p');m.className='muted';m.textContent='Website còn thiếu dữ kiện: '+batch.missing_fields.join(', ')+'. Bản nháp vẫn dùng được; cần bổ sung trước Gate A.';cards.append(m)}if((batch.conflicts||[]).length){const c=document.createElement('p');c.className='err';c.textContent='Dữ kiện chưa xác nhận, không dùng làm khẳng định trong Content: '+batch.conflicts.join(', ')+'.';cards.append(c)}
       for(const variant of(batch.variants||[])){
         const card=document.createElement('article');card.className='item';card.dataset.variantId=variant.content_variant_id;card.dataset.selected=String(pkg.selected_content_variant_id===variant.content_variant_id);card.innerHTML='<b></b><label>Tiêu đề</label><input data-title><label>Nội dung</label><textarea data-body rows="5"></textarea><button type="button" data-edit>Lưu chỉnh sửa</button><button type="button" data-select class="secondary">Chọn mẫu</button><div data-channels></div><p data-status class="muted"></p>';
         card.querySelector('b').textContent=(variant.status||'DRAFT')+' · '+variant.content_variant_id+' · revision '+variant.content_revision;
@@ -2305,8 +2333,8 @@ class Handler(BaseHTTPRequestHandler):
                         previous_provider_calls = int(previous_response.get("provider_calls") or 0)
                     except (TypeError, ValueError):
                         previous_provider_calls = 0
-                    if (prior_attempt.get("status") == "IN_PROGRESS" or previous_provider_calls > 0
-                            or previous_response.get("dispatch_started") is not False):
+                    previous_dispatch_state = content_request_dispatch_state(prior_attempt)
+                    if previous_dispatch_state is not False:
                         self.send_json({"error": "CONTENT_REQUEST_OUTCOME_UNKNOWN",
                             "intake_id": intake_id, "review_id": existing_package.get("review_id"),
                             "provider_calls": 0, "previous_attempt_unverified": True,
@@ -2317,7 +2345,7 @@ class Handler(BaseHTTPRequestHandler):
                         same_revision = int(prior_attempt.get("input_revision", -1)) == int(record.get("inputRevision", 1))
                     except (TypeError, ValueError):
                         same_revision = False
-                    if previous_response.get("dispatch_started") is False and same_revision:
+                    if previous_dispatch_state is False and same_revision:
                         if prior_error not in CONTENT_SAFE_PREFLIGHT_ERRORS:
                             self.send_json({"error": "CONTENT_PREVIOUS_ATTEMPT_BLOCKED", "reason": prior_error,
                                 "intake_id": intake_id, "review_id": existing_package.get("review_id"),
@@ -2456,7 +2484,7 @@ class Handler(BaseHTTPRequestHandler):
                     center._persist(live)
                     append_audit("review_evidence_create", live["review_id"], "succeeded", None, 1,
                                  operation_id=f"op-{evidence_revision_id}", idempotency_key=evidence_revision_id)
-                generation_id = "generation-" + hashlib.sha256((intake_id + ":" + request_key).encode()).hexdigest()[:24]
+                generation_id = "generation-" + hashlib.sha256((intake_id + ":" + str(record.get("inputRevision", 1)) + ":" + request_key).encode()).hexdigest()[:24]
                 consented_at = now_iso()
                 consent_scope = content_consent_scope(record, _AI_PROVIDER.model)
                 request_entry = {"idempotency_key": request_key, "generation_id": generation_id,
@@ -2478,12 +2506,16 @@ class Handler(BaseHTTPRequestHandler):
 
         candidate = live.get("candidate") or {}
         facts, source_text = _provider_content_inputs(candidate)
+        conflict_aliases = {"transaction_type": "price_type", "price_type": "transaction_type"}
+        blocked_source_fields = {str(item.get("field")) for item in candidate.get("conflicts", [])
+                                 if isinstance(item, dict) and item.get("field")}
+        blocked_fields = {conflict_aliases.get(field, field) for field in blocked_source_fields}
+        facts = {key: value for key, value in facts.items()
+                 if key not in blocked_source_fields and key not in blocked_fields}
         evidence_rows = live.get("evidence_revisions") or []
         evidence = evidence_rows[-1].get("evidence", {}) if evidence_rows else {}
         citations = evidence.get("citations") if isinstance(evidence.get("citations"), list) else []
         blockers = []
-        if candidate.get("conflicts"):
-            blockers.append("SOURCE_CONFLICTS_REQUIRE_OWNER_REVIEW")
         if not source_text and not any(v not in (None, "") for v in facts.values()):
             blockers.append("CONTENT_SOURCE_REQUIRED")
         if evidence.get("rights_status") not in {"COMPANY", "PERSONAL", "APPROVED"}:
@@ -2493,7 +2525,8 @@ class Handler(BaseHTTPRequestHandler):
         if blockers:
             response = {"error": "CONTENT_PREREQUISITES_REQUIRED", "blockers": blockers,
                         "intake_id": intake_id, "review_id": live["review_id"],
-                        "state": live.get("state"), "published": False, "provider_calls": 0}
+                        "state": live.get("state"), "published": False, "provider_calls": 0,
+                        "dispatch_started": False}
             request_entry.update({"status": "BLOCKED", "response": response, "finished_at": now_iso()})
             center._persist(live)
             self.send_json(response, 409)
@@ -2505,7 +2538,7 @@ class Handler(BaseHTTPRequestHandler):
             provenance={"intake_id": intake_id, "review_id": live["review_id"], "citations": citations},
             rights_status=evidence.get("rights_status"), media=candidate.get("media") or [],
             provider=_AI_PROVIDER, model=_AI_PROVIDER.model, usage_sink=_USAGE_LEDGER,
-            review_id=live["review_id"], source_text=source_text)
+            review_id=live["review_id"], source_text=source_text, blocked_fields=sorted(blocked_fields))
         if result.get("status") != "PASS" or len(result.get("variants", [])) != 5:
             reason_codes = result.get("reason_codes", [result.get("status", "BLOCKED")])
             safe_error = reason_codes[0] if reason_codes and reason_codes[0] in CONTENT_SAFE_PREFLIGHT_ERRORS else "CONTENT_GENERATION_BLOCKED"
@@ -2545,6 +2578,8 @@ class Handler(BaseHTTPRequestHandler):
             provenance_map[target] = {"intake_id": intake_id, "origin": "AI_EXTRACTED",
                 "confidence": "SOURCE_QUOTED", "evidence_excerpt": proposal["evidence"],
                 "source_revision": int(record.get("sourceNoteRevision", 1))}
+            if target in existing_conflict_fields:
+                continue
             if current in (None, ""):
                 candidate_facts[target] = normalized_value
             elif str(current).strip().casefold() != str(normalized_value).strip().casefold():
@@ -2593,6 +2628,7 @@ class Handler(BaseHTTPRequestHandler):
                     "review_revision": batch["review_revision"], "content_batch_id": batch["content_batch_id"],
                     "facts_revision_id": facts_revision_id, "ai9_layers": batch["ai9_layers"],
                     "generation": batch["generation"], "variants": batch["variants"],
+                    "provider_calls": result.get("provider_calls", 1), "dispatch_started": result.get("dispatch_started", True),
                     "media_analysis": "NOT_SENT", "mutated_property_store": False, "published": False}
         request_entry.update({"status": "SUCCEEDED", "response": response, "finished_at": now_iso()})
         live["updated_at"] = now_iso()

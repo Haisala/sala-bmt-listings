@@ -26,7 +26,7 @@ CONTENT_BATCH_OUTPUT_COUNT = 5
 def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any], provenance: dict[str, Any], rights_status: str | None,
                                    media: list[dict[str, Any]] | None, provider: Any | None, model: str,
                                    usage_sink: Any | None = None, review_id: str | None = None,
-                                   source_text: str = "") -> dict[str, Any]:
+                                   source_text: str = "", blocked_fields: list[str] | None = None) -> dict[str, Any]:
     """One injected provider call producing one private five-output Content batch."""
     if provider is None:
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_MODEL_NOT_CONFIGURED"], "published": False, "variants": []}
@@ -39,7 +39,9 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
     payload = {"generation_id": generation_id, "model": model, "facts": {k: v for k, v in facts.items() if v not in (None, "")},
                "provenance": provenance, "rights_status": rights_status, "media": [], "media_analysis": "NOT_SENT",
                "source_text": source_text, "output_count": CONTENT_BATCH_OUTPUT_COUNT,
-               "output_schema": "exactly_five_content_variants"}
+               "output_schema": "exactly_five_content_variants",
+               "blocked_fields": sorted({field for field in (blocked_fields or [])
+                                          if isinstance(field, str) and field in CONTENT_NORMALIZED_FACT_FIELDS})}
     seed = f"{generation_id}:{model}:content-batch-v1"
     receipt_id = _id("content-receipt", seed)
     provider_name = getattr(provider, "provider_name", "injected")
@@ -85,7 +87,8 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         }
         return {"status": "BLOCKED", "reason_codes": reason_codes, "published": False,
                 "mutated_property_store": False, "variants": [], "receipt": receipt,
-                "validation_diagnostic": validation_diagnostic}
+                "validation_diagnostic": validation_diagnostic, "provider_calls": 1,
+                "dispatch_started": True}
 
     try:
         response = provider.generate(payload)
@@ -160,11 +163,11 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
     if len(extracted_fields) != len(normalized_facts):
         return failed_response(["CONTENT_FACTS_SCHEMA_INVALID"], validation_diagnostic={
             "stage": "normalized_facts", "rule": "one_proposal_per_field"})
-    safe_conflicts = sorted({value for value in conflicts
-                             if isinstance(value, str) and value in CONTENT_NORMALIZED_FACT_FIELDS})
-    if len(safe_conflicts) != len(set(conflicts)):
+    if (not all(isinstance(value, str) and value in CONTENT_NORMALIZED_FACT_FIELDS for value in conflicts)
+            or len(conflicts) != len(set(conflicts))):
         return failed_response(["CONTENT_SOURCE_CONFLICT_SCHEMA_INVALID"], validation_diagnostic={
             "stage": "source_conflicts", "rule": "allowlisted_field_names_only"})
+    safe_conflicts = sorted(set(conflicts) | set(payload["blocked_fields"]))
     allowed.update(extracted_fields)
     bodies = []
     for item in variants:
@@ -199,7 +202,13 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
     request_id = response_request_id
     usage_receipt = record_attempt(outcome="SUCCEEDED", usage=usage, request_id=request_id)
     if usage_receipt is None:
-        return {"status": "BLOCKED", "reason_codes": ["USAGE_RECEIPT_WRITE_FAILED"], "published": False, "variants": []}
+        return {"status": "BLOCKED", "reason_codes": ["USAGE_RECEIPT_WRITE_FAILED"], "published": False,
+                "variants": [], "provider_calls": 1, "dispatch_started": True,
+                "receipt": {"receipt_id": receipt_id, "generation_id": generation_id,
+                            "review_id": review_id, "intake_id": provenance.get("intake_id"),
+                            "provider": provider_name, "model": model, "request_id": request_id,
+                            "usage": normalize_usage(usage), "ledger_status": "WRITE_FAILED",
+                            "outcome": "FAILED_RECEIPT_WRITE"}}
     output = []
     for index, item in enumerate(variants, 1):
         output.append({**item, "content_variant_id": _id("content-variant", f"{seed}:{index}"), "variant_index": index, "status": "DRAFT", "visibility": "INTERNAL_ONLY", "generation_id": generation_id, "model": model, "content_batch_id": batch_id, "receipt_id": receipt_id})
@@ -214,7 +223,8 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
     return {"status": "PASS", "generation_id": generation_id, "content_batch_id": batch_id,
             "content_variant_ids": receipt["content_variant_ids"], "variants": output, "receipt": receipt,
             "normalized_facts": normalized_facts, "missing_fields": missing_fields, "conflicts": safe_conflicts,
-            "published": False, "mutated_property_store": False, "media_analysis": "NOT_SENT"}
+            "published": False, "mutated_property_store": False, "media_analysis": "NOT_SENT",
+            "provider_calls": 1, "dispatch_started": True}
 
 
 def build_generative_internal_draft(*, ai_run: dict[str, Any], facts: dict[str, Any], provenance_status: str,

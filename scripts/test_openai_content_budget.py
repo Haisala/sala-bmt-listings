@@ -56,6 +56,10 @@ def main():
     assert compact_upper<=MAX_CONTENT_INPUT_TOKENS
     assert compact_input["source_text"]=="Giá thuê 6 triệu/tháng, căn hộ đầy đủ nội thất, mặt tiền Tôn Đức Thắng."
     assert compact_input["facts"] and set(compact_input["facts"]).issubset(long_facts)
+    conflicted=build_content_request({"facts":{"title":"TEST_ONLY home"},"source_text":"TEST_ONLY source",
+      "blocked_fields":["area","price_vnd"]},"gpt-6-luna")
+    assert json.loads(conflicted["input"])["blocked_fields"]==["area","price_vnd"]
+    assert "blocked_fields" in conflicted["instructions"] and "Không đoán" in conflicted["instructions"]
     preflight_transport=Transport({"v":compact_variants(),"f":[],"m":[],"c":[]})
     with patch("property_memory.providers.openai_provider.build_content_request",
                side_effect=ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")):
