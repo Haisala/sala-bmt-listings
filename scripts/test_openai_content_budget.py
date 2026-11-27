@@ -42,8 +42,8 @@ def main():
     assert request["max_output_tokens"]==900 and _content_cost_upper_bound(size,900)<0.01
     fact_key_schema=schema["properties"]["v"]["items"]["properties"]["f"]["items"]
     assert fact_key_schema=={"type":"string"}, "server-side grounded-fact validation owns the allowlist"
-    assert schema["properties"]["f"]["maxItems"]==0
-    assert "f cấp cao nhất để rỗng" in request["instructions"]
+    assert schema["properties"]["f"]["items"]=={"type":"array","items":{"type":"string"}}
+    assert "evidence" in request["instructions"] and "5 bài" in request["instructions"]
     long_facts={"title":"Căn hộ TEST_ONLY nội thất đầy đủ","property_type":"APARTMENT",
       "address":"EcoCity, mặt tiền Tôn Đức Thắng","area":"62 m²","price_vnd_per_month":6000000,
       "price_type":"RENT","house_type":"APARTMENT","description":"TEST_ONLY mô tả chi tiết "*14,
@@ -54,8 +54,8 @@ def main():
     compact_upper=(len(compact["instructions"].encode())+len(compact["input"].encode())+
       len(json.dumps(compact_schema,ensure_ascii=False,separators=(",",":")).encode())+len("content_five"))
     assert compact_upper<=MAX_CONTENT_INPUT_TOKENS
-    assert "source_text" not in compact_input, "optional raw excerpt must yield budget to revision-bound facts"
-    assert {"title","address","area","price_vnd_per_month","price_type"}.issubset(compact_input["facts"])
+    assert compact_input["source_text"]=="Giá thuê 6 triệu/tháng, căn hộ đầy đủ nội thất, mặt tiền Tôn Đức Thắng."
+    assert compact_input["facts"] and set(compact_input["facts"]).issubset(long_facts)
     preflight_transport=Transport({"v":compact_variants(),"f":[],"m":[],"c":[]})
     with patch("property_memory.providers.openai_provider.build_content_request",
                side_effect=ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")):
@@ -67,7 +67,7 @@ def main():
     try: build_content_request({"facts":{},"source_text":""},"gpt-6-luna")
     except ValueError as e: assert str(e)=="CONTENT_INPUT_REQUIRED"
     else: raise AssertionError("empty prompt accepted")
-    try: build_content_request({"facts":{"title":"x"},"source_text":"x"*321},"gpt-6-luna")
+    try: build_content_request({"facts":{"title":"x"},"source_text":"x"*3201},"gpt-6-luna")
     except ValueError as e: assert str(e)=="CONTENT_SOURCE_LIMIT_INVALID"
     else: raise AssertionError("silently truncated source")
 

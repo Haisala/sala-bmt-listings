@@ -96,7 +96,7 @@ def main():
       assert intake["status"]=="CONTENT_CREATED" and intake["contentReviewId"]==body["review_id"]
       assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
       assert len(center.packages[body["review_id"]]["candidate"]["media"])==10
-      assert provider.last_payload["media"]==[] and intake["note"] not in provider.last_payload.get("source_text","")
+      assert provider.last_payload["media"]==[] and intake["note"] in provider.last_payload.get("source_text","")
       assert body["generation"]["content_variant_ids"]==[v["content_variant_id"] for v in body["variants"]]
       assert all(v["intake_id"]==intake["id"] and v["review_id"]==body["review_id"]
                  and v["review_revision"]==body["review_revision"]
@@ -215,10 +215,11 @@ def main():
     http_store=PropertyStore(http_private/"store.sqlite3")
     http_center=ReviewCenter(http_store,reliability=ReliabilityBoundary(noop.audit,noop.enqueue))
     http_intake={"id":"TEST_ONLY-intake-http-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-http-fixture",
-      "note":"TEST_ONLY synthetic source text","preliminaryFacts":{"property_type":"APARTMENT","transaction_type":"SALE","price_vnd":1000000000,"address":"TEST_ONLY address","area":"70 m²"},
+      "note":"TEST_ONLY Apartment available for rent; address EcoCity.","preliminaryFacts":{"transaction_type":"RENT"},
       "ownerEvidence":{"source_id":"TEST_ONLY-http-source","claim":"TEST_ONLY source","rights_status":"PERSONAL"},"inputRevision":1,"media":[]}
     (http_private/"index.json").write_text(json.dumps([http_intake]))
-    http_provider=Provider();http_usage=Usage();sid="TEST_ONLY-session"
+    http_provider=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY Apartment",
+      "normalized_value":"TEST_ONLY Apartment","evidence":"TEST_ONLY Apartment"}]);http_usage=Usage();sid="TEST_ONLY-session"
     env={"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":str(http_root),"BMT_ADMIN_OWNER_ID":"owner",
       "BMT_ADMIN_LOCAL_HTTP_DEV":"1","BMT_ADMIN_PUBLIC_ORIGIN":"","BMT_ADMIN_ALLOWED_IP":"","BMT_ADMIN_SECURE_COOKIE":"0"}
     with patch.dict(os.environ,env,clear=True),patch.object(admin,"PRIVATE_ROOT",http_private),patch.object(admin,"INBOX_ROOT",http_private/"inbox"),\
@@ -231,17 +232,6 @@ def main():
       url=f"http://127.0.0.1:{server.server_port}/api/intakes/{http_intake['id']}/create-content"
       request=urllib.request.Request(url,data=json.dumps({"idempotency_key":"TEST_ONLY-http-idempotency-001"}).encode(),method="POST",
         headers={"Content-Type":"application/json","Origin":f"http://127.0.0.1:{server.server_port}","Cookie":"bmt_admin_session="+sid})
-      try: urllib.request.urlopen(request,timeout=5)
-      except urllib.error.HTTPError as e: status=e.code;missing_body=json.loads(e.read())
-      else: raise AssertionError("incomplete source unexpectedly generated Content")
-      assert status==409 and missing_body["missing_fields"]==["title"] and missing_body["provider_calls"]==0
-      assert http_provider.calls==0 and http_center.packages=={}
-      draft_url=f"http://127.0.0.1:{server.server_port}/api/intakes/{http_intake['id']}/draft"
-      draft_req=urllib.request.Request(draft_url,data=json.dumps({"expected_input_revision":1,"facts":{"title":"TEST_ONLY HTTP property"}}).encode(),method="POST",
-        headers={"Content-Type":"application/json","Origin":f"http://127.0.0.1:{server.server_port}","Cookie":"bmt_admin_session="+sid})
-      with urllib.request.urlopen(draft_req,timeout=5) as response: draft_status=response.status;draft_body=json.loads(response.read())
-      assert draft_status==201 and draft_body["input_revision"]==2
-      assert http_intake["id"]==draft_body["id"] and http_store.list_properties()==[]
       try: urllib.request.urlopen(request,timeout=5)
       except urllib.error.HTTPError as e: rights_status=e.code;rights_body=json.loads(e.read())
       else: raise AssertionError("missing media/source-rights confirmation unexpectedly dispatched")
@@ -258,9 +248,25 @@ def main():
         "source_media_rights_confirmed":True,"external_text_processing_consent":True}).encode(),method="POST",headers=request.headers)
       with urllib.request.urlopen(consented_request,timeout=5) as response: status=response.status;http_body=json.loads(response.read())
       assert status==201 and len(http_body["variants"])==5 and http_body["published"] is False
+      saved_package=http_center.packages[http_body["review_id"]]
+      assert saved_package["candidate"]["facts"].get("title")=="TEST_ONLY Apartment"
+      assert saved_package["candidate"]["fact_provenance"].get("title",{}).get("origin")=="AI_EXTRACTED"
+      assert saved_package["candidate"].get("missing_fields",[])
       with urllib.request.urlopen(consented_request,timeout=5) as response: replay_status=response.status;replay_body=json.loads(response.read())
       assert replay_status==200 and replay_body["content_batch_id"]==http_body["content_batch_id"]
-      assert http_provider.calls==1 and len(http_usage.rows)==1 and http_store.list_properties()==[]
+      edit_url=f"http://127.0.0.1:{server.server_port}/api/reviews/{http_body['review_id']}/edit"
+      edit_req=urllib.request.Request(edit_url,data=json.dumps({"expected_revision":http_body["review_revision"],"field":"area","value":"72 m²"}).encode(),method="POST",headers=request.headers)
+      with urllib.request.urlopen(edit_req,timeout=5) as response: edit_status=response.status;edited=json.loads(response.read())
+      assert edit_status==200 and edited["review_revision"]==http_body["review_revision"]+1
+      refresh_req=urllib.request.Request(url,data=json.dumps({"idempotency_key":"TEST_ONLY-explicit-refresh-002","refresh_content":True}).encode(),method="POST",headers=request.headers)
+      with urllib.request.urlopen(refresh_req,timeout=5) as response: refresh_status=response.status;refreshed=json.loads(response.read())
+      assert refresh_status==201 and len(refreshed["variants"])==5 and refreshed["content_batch_id"]!=http_body["content_batch_id"]
+      refreshed_package=http_center.packages[http_body["review_id"]]
+      assert len(refreshed_package["content_batches"])==2
+      assert refreshed_package["content_batches"][0]["content_batch_id"]==http_body["content_batch_id"]
+      assert refreshed_package["content_batches"][1]["review_revision"]==edited["review_revision"]
+      assert http_provider.calls==2 and len(http_usage.rows)==2 and http_store.list_properties()==[]
+      assert http_provider.calls==2 and len(http_usage.rows)==2 and http_store.list_properties()==[]
       http_intake_b={"id":"TEST_ONLY-intake-http-b","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-http-fixture-b","note":"TEST_ONLY separate source",
         "preliminaryFacts":{"title":"TEST_ONLY B","property_type":"APARTMENT","transaction_type":"SALE","price_vnd":1000000000,"address":"TEST_ONLY B address","area":"70 m²"},
         "ownerEvidence":{"source_id":"TEST_ONLY-http-source-b","claim":"TEST_ONLY source B","rights_status":"COMPANY"},"media":[]}
@@ -273,7 +279,7 @@ def main():
       except urllib.error.HTTPError as e: cross_status=e.code;cross_body=json.loads(e.read())
       else: raise AssertionError("evidence from intake A was accepted for intake B")
       assert cross_status==409 and cross_body["error"]=="EVIDENCE_INTAKE_MISMATCH" and cross_body["intake_id"]==http_intake_b["id"]
-      assert http_provider.calls==1 and len(http_usage.rows)==1
+      assert http_provider.calls==2 and len(http_usage.rows)==2
       server.shutdown();server.server_close();thread.join(timeout=3);admin.SESSIONS.pop(sid,None);admin.SESSION_OWNERS.pop(sid,None);http_store.close()
 
     from property_memory.content_studio import build_generative_content_batch
@@ -292,9 +298,9 @@ def main():
     invented=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY","normalized_value":"invented","evidence":"absent"}])
     invented_out=build_generative_content_batch(**base,provider=invented,usage_sink=Usage())
     assert invented_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
-    assert invented_out["validation_diagnostic"]=={"stage":"normalized_facts","rule":"content_must_not_create_facts","item_index":0,"field":"title"}
+    assert invented_out["validation_diagnostic"]=={"stage":"normalized_facts","rule":"allowlisted_field_raw_value_and_exact_source_excerpt","item_index":0,"field":"title"}
     assert "TEST_ONLY" not in json.dumps(invented_out["validation_diagnostic"])
-    # All normalized-fact variants are rejected with a field-safe diagnostic;
+    # Unsupported normalized-fact variants are rejected with a field-safe diagnostic;
     # no source value/evidence text is copied into the diagnostic or receipt.
     invalid_fact_items=(
       {"field":"unknown_field","raw_value":"x","normalized_value":"x","evidence":"TEST_ONLY"},
@@ -312,7 +318,7 @@ def main():
       bad=Provider(normalized_facts=[item]);sink=Usage()
       rejected=build_generative_content_batch(**base,provider=bad,usage_sink=sink)
       assert rejected["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
-      assert rejected["validation_diagnostic"]["rule"]=="content_must_not_create_facts"
+      assert rejected["validation_diagnostic"]["rule"]=="allowlisted_field_raw_value_and_exact_source_excerpt"
       assert rejected["receipt"]["request_id"]=="req_TEST_ONLY" and len(sink.rows)==1
       assert "TEST_ONLY" not in json.dumps(rejected["validation_diagnostic"])
     # Normalized Vietnamese text, units, numeric prices and optional fields
@@ -326,7 +332,7 @@ def main():
     assert priced.get("price_vnd_per_month")==6000000 and isinstance(priced["price_vnd_per_month"],int)
     mismatch=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY","normalized_value":"different","evidence":"TEST_ONLY"}])
     mismatch_out=build_generative_content_batch(**base,provider=mismatch,usage_sink=Usage())
-    assert mismatch_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
+    assert mismatch_out["status"]=="PASS" and mismatch_out["normalized_facts"][0]["normalized_value"]=="different"
     normalized_only=Provider(facts_used=["area"],normalized_facts=[{"field":"area","raw_value":"50 m2","normalized_value":"50 m2","evidence":"TEST_ONLY"}])
     normalized_only_out=build_generative_content_batch(**base,provider=normalized_only,usage_sink=Usage())
     assert normalized_only_out["reason_codes"]==["CONTENT_FACTS_EVIDENCE_INVALID"]
@@ -369,9 +375,8 @@ def main():
         value=super().generate(payload);value["conflicts"]=["title"];return value
     conflict_provider=ConflictingProvider()
     conflict_result=build_generative_content_batch(**base,provider=conflict_provider,usage_sink=Usage())
-    assert conflict_result["reason_codes"]==["CONTENT_SOURCE_CONFLICT"] and conflict_provider.calls==1
-    assert conflict_result["validation_diagnostic"]=={
-      "stage":"source_conflicts","rule":"provider_reported_conflict","allowed_field_count":1,"fields":["title"]}
+    assert conflict_result["reason_codes"]==["CONTENT_FACTS_UNGROUNDED"] and conflict_provider.calls==1
+    assert conflict_result["validation_diagnostic"]["stage"]=="variant_facts_used"
     no_rights=Provider();out=build_generative_content_batch(**{**base,"rights_status":"UNKNOWN"},provider=no_rights,usage_sink=Usage())
     assert out["status"]=="BLOCKED" and no_rights.calls==0
     # Same synthetic Content batch now continues through Gate A and Gate B:
@@ -411,6 +416,18 @@ def main():
     assert not approved_without_content.get("selected_content")
     assert approved_without_content["mutation_result"]["property_id"]
     assert len(approved_without_content.get("content_batches",[]))==0
+    conflict_intake={"id":"TEST_ONLY-intake-conflict-confirm","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-conflict-confirm",
+      "note":"TEST_ONLY synthetic conflict source","preliminaryFacts":{"title":"TEST_ONLY Owner choice","property_type":"HOUSE",
+      "transaction_type":"SALE","price_vnd":2100000000,"address":"TEST_ONLY conflict address","area":"88 m²",
+      "house_type":"TEST_ONLY house","bedrooms":3,"bathrooms":2},"media":[]}
+    conflict_package=process_intake(store,center,conflict_intake,ai_gateway=None,operation_id=conflict_intake["id"])
+    conflict_package=center.packages[conflict_package["review_id"]]
+    conflict_package["candidate"]["conflicts"]=[{"field":"title","kind":"AI_SOURCE_CONFLICT","current_value":"Old","source_value":"New","evidence":"TEST_ONLY"}]
+    center._persist(conflict_package)
+    conflict_confirmed=center.edit(conflict_package["review_id"],expected_revision=1,field="title",
+      value="TEST_ONLY Owner choice",owner_id="owner")
+    assert conflict_confirmed["candidate"]["conflicts"]==[]
+    assert conflict_confirmed["owner_edits"][-1]["origin"]=="OWNER_CONFIRMED"
     ui=Path(__file__).resolve().parents[1]/"admin"/"intake_workflow_ui.py"
     ui_text=ui.read_text(encoding="utf-8")
     assert "approve.disabled=approve.disabled||(hasVariants&&!selected)" not in ui_text

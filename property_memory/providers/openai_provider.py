@@ -18,7 +18,7 @@ CONTENT_PROMPT_VERSION = "content-studio-v2"
 CONTENT_VARIANT_COUNT = 5
 CONTENT_NORMALIZED_FACT_FIELDS = (
     "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
-    "price_type", "legal_status", "house_type", "description",
+    "price_type", "legal_status", "house_type", "bedrooms", "bathrooms", "description",
 )
 CONTENT_FACT_PRIORITY = (
     "title", "property_type", "address", "area", "price_vnd", "price_vnd_per_month",
@@ -58,12 +58,9 @@ CONTENT_RESPONSE_SCHEMA = {
                            "t": {"type": "string"}, "b": {"type": "string"},
                            "f": _FACT_USAGE_ARRAY, "u": _STRING_ARRAY, "w": _STRING_ARRAY},
             "required": ["i", "t", "b", "f", "u", "w"]}},
-        # Content generation consumes already-normalized intake facts. It must
-        # not create a second, unrevisioned fact/evidence set.
-        "f": {"type": "array", "maxItems": 0, "items": {"type": "object", "additionalProperties": False,
-            "properties": {"k": {"type": "string"}, "r": {"type": "string"},
-                           "n": {"type": "string"}, "e": {"type": "string"}},
-            "required": ["k", "r", "n", "e"]}},
+        # One bounded request may extract source-backed fact proposals alongside
+        # five drafts. The caller verifies evidence and keeps these proposals private.
+        "f": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
         "m": _STRING_ARRAY, "c": _STRING_ARRAY,
     },
     "required": ["v", "f", "m", "c"],
@@ -125,17 +122,16 @@ def _content_cost_upper_bound(request_bytes: int, max_output_tokens: int) -> flo
 
 
 def build_content_request(payload: dict[str, Any], model: str, *, max_output_tokens: int = MAX_CONTENT_OUTPUT_TOKENS) -> dict[str, Any]:
-    """Build one bounded five-variant request from revision-bound facts."""
+    """Build one bounded request that extracts facts and drafts five variants."""
     if model != DEFAULT_EXTRACTION_MODEL or max_output_tokens != MAX_CONTENT_OUTPUT_TOKENS:
         raise ValueError("CONTENT_MODEL_OR_OUTPUT_CAP_INVALID")
     facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
     source_text = payload.get("source_text")
-    if source_text is not None and (not isinstance(source_text, str) or len(source_text) > 320):
+    if source_text is not None and (not isinstance(source_text, str) or len(source_text) > 3200):
         raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
     if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
         raise ValueError("CONTENT_INPUT_REQUIRED")
-    instructions = ("Dùng đúng facts, không bịa. Tạo đúng 5 mẫu tiếng Việt khác nhau. "
-                    "Trong v[].f chỉ ghi key có trong facts; f cấp cao nhất để rỗng.")
+    instructions = "Từ source_text trích fact hỗ trợ vào f=[[field,raw,normalized,evidence]], trích dẫn nguyên văn. Không đoán; m=thiếu,c=mâu thuẫn. Dùng facts+f không xung đột tạo đúng 5 bài ngắn tiếng Việt khác nhau; v.f chỉ field dùng. Không gửi ảnh; không tự suy diễn pháp lý, liên hệ, quyền đăng."
     def compose(selected_facts: dict[str, Any], include_source: bool = False) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
@@ -156,7 +152,7 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         return request if request_bytes <= MAX_CONTENT_REQUEST_BYTES and input_token_upper_bound <= MAX_CONTENT_INPUT_TOKENS else None
 
     selected: dict[str, Any] = {}
-    request = compose(selected)
+    request = compose(selected, include_source=bool(isinstance(source_text, str) and source_text.strip()))
     for field in CONTENT_FACT_PRIORITY:
         value = facts.get(field)
         if value in (None, "", [], {}):
@@ -168,17 +164,11 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         elif not isinstance(value, (int, float, bool)):
             continue
         candidate = {**selected, field: value}
-        bounded = compose(candidate)
+        bounded = compose(candidate, include_source=bool(isinstance(source_text, str) and source_text.strip()))
         if bounded is not None:
             selected = candidate
             request = bounded
-    # Source excerpts are optional evidence retained in provenance. Facts take
-    # priority under the hard input cap; include the excerpt only if it fits
-    # without dropping any selected facts.
-    if request is not None and isinstance(source_text, str) and source_text.strip():
-        with_source = compose(selected, include_source=True)
-        if with_source is not None:
-            request = with_source
+    # Raw source is mandatory when supplied: never silently drop or truncate it.
     if request is None:
         raise ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")
     request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -326,12 +316,17 @@ class OpenAIPropertyProvider:
             exc.diagnostics.setdefault("model", self.model)
             raise
         if "v" in value:
+            raw_facts = value.get("f", [])
+            if (not isinstance(raw_facts, list) or len(raw_facts) > 12
+                    or any(not isinstance(item, list) or len(item) != 4
+                           or not all(isinstance(part, str) for part in item) for item in raw_facts)):
+                raise ProviderError("MALFORMED_CONTENT_OUTPUT", "Provider fact proposals were malformed")
             value = {"variants": [{"variant_index": x.get("i"), "title": x.get("t"), "body": x.get("b"),
                                     "facts_used": x.get("f"), "citations_used": [], "unknowns": x.get("u"),
                                     "warnings": x.get("w")} for x in value.get("v", []) if isinstance(x, dict)],
-                     "normalized_facts": [{"field": x.get("k"), "raw_value": x.get("r"),
-                                           "normalized_value": x.get("n"), "evidence": x.get("e")}
-                                          for x in value.get("f", []) if isinstance(x, dict)],
+                     "normalized_facts": [{"field": x[0], "raw_value": x[1],
+                                           "normalized_value": x[2], "evidence": x[3]}
+                                          for x in raw_facts],
                      "missing_fields": value.get("m"), "conflicts": value.get("c")}
         variants = value.get("variants")
         indices = [x.get("variant_index") for x in variants if isinstance(x, dict)] if isinstance(variants, list) else []

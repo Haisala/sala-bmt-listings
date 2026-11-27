@@ -159,28 +159,12 @@ def _provider_safe_text(value: Any) -> str:
 
 
 def _provider_content_inputs(candidate: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """Send normalized facts and short evidence only, never the full source note."""
+    """Send safe normalized candidates plus the saved text source; never send media bytes."""
     raw_facts = candidate.get("facts") if isinstance(candidate.get("facts"), dict) else {}
     facts = {key: (_provider_safe_text(value) if isinstance(value, str) else value)
              for key, value in raw_facts.items() if value not in (None, "")}
-    provenance = candidate.get("fact_provenance") if isinstance(candidate.get("fact_provenance"), dict) else {}
-    excerpts: list[str] = []
-    seen: set[str] = set()
-    for field in ("transaction_type", "property_type", "title", "address", "area", "price_vnd",
-                  "price_vnd_per_month", "price_cycle", "house_type", "bedrooms", "bathrooms"):
-        entry = provenance.get(field)
-        excerpt = _provider_safe_text(entry.get("evidence_excerpt")) if isinstance(entry, dict) else ""
-        if excerpt and excerpt not in seen:
-            seen.add(excerpt)
-            excerpts.append(excerpt)
-    source_text = " · ".join(excerpts)
-    if len(source_text) > 320:
-        bounded: list[str] = []
-        for excerpt in excerpts:
-            candidate_text = " · ".join([*bounded, excerpt])
-            if len(candidate_text) <= 320:
-                bounded.append(excerpt)
-        source_text = " · ".join(bounded)
+    raw = candidate.get("raw") if isinstance(candidate.get("raw"), dict) else {}
+    source_text = _provider_safe_text(raw.get("note") or raw.get("text") or "")
     return facts, source_text
 
 
@@ -1768,7 +1752,8 @@ CONTENT_STUDIO_UI = '''<script>
       panel.prepend(evidencePanel);
     }else{const status=document.createElement('p');status.className='muted';status.textContent='Nguồn/quyền đã có xác nhận revision '+evidenceState.evidence_revision_id+'.';evidencePanel.append(status);panel.prepend(evidencePanel)}
     const post=async(action,data)=>{const r=await fetch('/api/reviews/'+encodeURIComponent(id)+'/content/'+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const d=await r.json();if(!r.ok)throw Error(d.error||'HTTP '+r.status);return d};
-    for(const batch of(pkg.content_batches||[])){
+    const contentHistory=pkg.content_batches||[],visibleContentBatches=contentHistory.slice(-1);if(contentHistory.length>1){const history=document.createElement('p');history.className='muted';history.textContent=(contentHistory.length-1)+' batch Content cũ được giữ trong lịch sử.';cards.append(history)}
+    for(const batch of visibleContentBatches){
       const head=document.createElement('p');head.className='muted';const g=batch.generation||{},u=g.usage||{};
       head.textContent=`${batch.status||'PRIVATE_DRAFT'} · ${batch.content_batch_id} · facts ${batch.facts_revision_id} · ${g.model||''} · ${u.input_tokens??'—'}/${u.output_tokens??'—'} tokens · ${g.request_id||'—'} · est. ${g.estimated_cost_usd??'—'} USD · media ${batch.media_analysis||'NOT_SENT'}`;cards.append(head);
       if((batch.normalized_facts||[]).length){const f=document.createElement('p');f.className='muted';f.textContent='Facts trích từ nguồn (chưa Owner xác nhận): '+batch.normalized_facts.map(x=>x.field+'='+x.normalized_value+' ['+x.evidence+']').join(' · ');cards.append(f)}
@@ -2260,21 +2245,32 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(batch, dict) and isinstance(batch.get("variants"), list)
                     and len(batch["variants"]) == 5), None)
                 if complete_batch is not None:
-                    prior_success = next((entry for entry in reversed(existing_package.get("content_generation_requests", []))
-                        if entry.get("status") == "SUCCEEDED" and isinstance(entry.get("response"), dict)), None)
-                    recovered = deepcopy(prior_success["response"]) if prior_success else {
-                        "status": complete_batch.get("status", "PRIVATE_DRAFT"),
-                        "intake_id": intake_id, "review_id": existing_package.get("review_id"),
-                        "review_revision": complete_batch.get("review_revision"),
-                        "content_batch_id": complete_batch.get("content_batch_id"),
-                        "facts_revision_id": complete_batch.get("facts_revision_id"),
-                        "generation": complete_batch.get("generation"),
-                        "variants": complete_batch["variants"], "published": False,
-                        "mutated_property_store": False,
-                    }
-                    recovered["idempotent_replay"] = True
-                    self.send_json(recovered, 200)
-                    return
+                    refresh_requested = payload.get("refresh_content") is True
+                    batch_is_stale = int(complete_batch.get("review_revision", -1)) != int(existing_package.get("review_revision", -2))
+                    if refresh_requested and not batch_is_stale:
+                        self.send_json({"error": "CONTENT_REFRESH_NOT_REQUIRED", "review_id": existing_package.get("review_id"),
+                            "provider_calls": 0, "published": False}, 409)
+                        return
+                    if refresh_requested and batch_is_stale:
+                        # Explicit Owner refresh creates a new immutable batch;
+                        # prior drafts and their usage receipts remain intact.
+                        pass
+                    else:
+                        prior_success = next((entry for entry in reversed(existing_package.get("content_generation_requests", []))
+                            if entry.get("status") == "SUCCEEDED" and isinstance(entry.get("response"), dict)), None)
+                        recovered = deepcopy(prior_success["response"]) if prior_success else {
+                            "status": complete_batch.get("status", "PRIVATE_DRAFT"),
+                            "intake_id": intake_id, "review_id": existing_package.get("review_id"),
+                            "review_revision": complete_batch.get("review_revision"),
+                            "content_batch_id": complete_batch.get("content_batch_id"),
+                            "facts_revision_id": complete_batch.get("facts_revision_id"),
+                            "generation": complete_batch.get("generation"),
+                            "variants": complete_batch["variants"], "published": False,
+                            "mutated_property_store": False,
+                        }
+                        recovered["idempotent_replay"] = True
+                        self.send_json(recovered, 200)
+                        return
                 prior_attempt = next((entry for entry in reversed(existing_package.get("content_generation_requests", []))
                     if isinstance(entry, dict) and entry.get("status") in {"IN_PROGRESS", "BLOCKED"}), None)
                 if prior_attempt is not None:
@@ -2340,9 +2336,12 @@ class Handler(BaseHTTPRequestHandler):
                             "provider_calls": 0, "published": False}, 409)
             return
         requested_evidence = bound_evidence
-        if missing_fields or missing_evidence or candidate_preview.get("conflicts"):
+        # Missing facts/conflicts are extracted and shown to the Owner after the
+        # single bounded request. Only source provenance/rights must be confirmed
+        # before dispatch; Gate A remains responsible for required canonical facts.
+        if missing_evidence:
             self.send_json({"error": "CONTENT_PREREQUISITES_REQUIRED", "intake_id": intake_id,
-                            "missing_fields": missing_fields, "missing_evidence": missing_evidence,
+                            "missing_fields": [], "missing_evidence": missing_evidence,
                             "conflicts": candidate_preview.get("conflicts", []),
                             "suggested_facts": record.get("preliminaryFacts", {}),
                             "input_revision": int(record.get("inputRevision", 1)),
@@ -2471,6 +2470,55 @@ class Handler(BaseHTTPRequestHandler):
             center._persist(live)
             self.send_json(response, 422)
             return
+
+        # AI proposals are private review facts with exact source excerpts. They
+        # fill only blank candidate fields; disagreements remain explicit conflicts.
+        fact_aliases = {"price_type": "transaction_type", "description": "description"}
+        numeric_fact_fields = {"price_vnd", "price_vnd_per_month", "bedrooms", "bathrooms"}
+        candidate_facts = live.setdefault("candidate", {}).setdefault("facts", {})
+        provenance_map = live["candidate"].setdefault("fact_provenance", {})
+        candidate_conflicts = live["candidate"].setdefault("conflicts", [])
+        existing_conflict_fields = {str(item.get("field")) for item in candidate_conflicts if isinstance(item, dict)}
+        for proposal in result.get("normalized_facts", []):
+            field = proposal["field"]
+            target = fact_aliases.get(field, field)
+            normalized = proposal["normalized_value"].strip()
+            if field in numeric_fact_fields:
+                digits = re.sub(r"[^0-9]", "", normalized)
+                if not digits:
+                    continue
+                normalized_value: Any = int(digits)
+            else:
+                normalized_value = normalized
+            current = candidate_facts.get(target)
+            provenance_map[target] = {"intake_id": intake_id, "origin": "AI_EXTRACTED",
+                "confidence": "SOURCE_QUOTED", "evidence_excerpt": proposal["evidence"],
+                "source_revision": int(record.get("sourceNoteRevision", 1))}
+            if current in (None, ""):
+                candidate_facts[target] = normalized_value
+            elif str(current).strip().casefold() != str(normalized_value).strip().casefold():
+                if target not in existing_conflict_fields:
+                    candidate_conflicts.append({"field": target, "kind": "AI_SOURCE_CONFLICT",
+                        "current_value": current, "source_value": normalized_value,
+                        "evidence": proposal["evidence"]})
+                    existing_conflict_fields.add(target)
+        reported_conflicts = set(result.get("conflicts", []))
+        for field in reported_conflicts:
+            mapped = fact_aliases.get(field, field)
+            if mapped not in existing_conflict_fields:
+                candidate_conflicts.append({"field": mapped, "kind": "AI_SOURCE_CONFLICT"})
+                existing_conflict_fields.add(mapped)
+        reported_missing = {str(field) for field in result.get("missing_fields", [])}
+        known_fact_fields = {"title", "address", "area", "property_type", "transaction_type",
+            "price_type", "price_vnd", "price_vnd_per_month", "price_cycle", "house_type",
+            "bedrooms", "bathrooms", "road_access", "legal_status"}
+        missing_now = ({str(field) for field in (live["candidate"].get("missing_fields") or [])}
+                       | reported_missing) & known_fact_fields
+        for field, value in candidate_facts.items():
+            if field in known_fact_fields and value not in (None, ""):
+                missing_now.discard(field)
+        live["candidate"]["missing_fields"] = sorted(missing_now)
+        center._persist(live)
 
         facts_revision_id = f"source-facts-{live['review_id']}-r{live.get('review_revision', 1)}"
         batch = {"content_batch_id": result["content_batch_id"], "generation_id": generation_id,

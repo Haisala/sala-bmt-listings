@@ -34,7 +34,7 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_INPUT_INVALID"], "published": False, "variants": []}
     if rights_status not in {"COMPANY", "PERSONAL", "APPROVED"}:
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_RIGHTS_REQUIRED"], "published": False, "variants": []}
-    if not isinstance(source_text, str) or len(source_text) > 320:
+    if not isinstance(source_text, str) or len(source_text) > 3200:
         return {"status": "BLOCKED", "reason_codes": ["CONTENT_SOURCE_LIMIT_INVALID"], "published": False, "variants": []}
     payload = {"generation_id": generation_id, "model": model, "facts": {k: v for k, v in facts.items() if v not in (None, "")},
                "provenance": provenance, "rights_status": rights_status, "media": [], "media_analysis": "NOT_SENT",
@@ -142,27 +142,38 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
         })
     else:
         allowed = set(submitted_fact_keys)
-    if normalized_facts:
-        item = normalized_facts[0]
-        field = item.get("field") if isinstance(item, dict) else None
-        return failed_response(["CONTENT_FACTS_EVIDENCE_INVALID"], validation_diagnostic={
-            "stage": "normalized_facts", "rule": "content_must_not_create_facts",
-            "item_index": 0, "field": field if isinstance(field, str) and field in CONTENT_NORMALIZED_FACT_FIELDS else None,
-        })
-    if conflicts:
-        safe_conflicts = sorted({value for value in conflicts
-                                 if isinstance(value, str) and value in CONTENT_NORMALIZED_FACT_FIELDS})
-        return failed_response(["CONTENT_SOURCE_CONFLICT"], validation_diagnostic={
-            "stage": "source_conflicts", "rule": "provider_reported_conflict",
-            "allowed_field_count": len(safe_conflicts), "fields": safe_conflicts,
-        })
+    extracted_fields: set[str] = set()
+    for index, item in enumerate(normalized_facts):
+        if (not isinstance(item, dict) or item.get("field") not in CONTENT_NORMALIZED_FACT_FIELDS
+                or not isinstance(item.get("normalized_value"), str)
+                or not isinstance(item.get("evidence"), str)
+                or not item["evidence"].strip() or len(item["evidence"]) > 240
+                or not isinstance(item.get("raw_value"), str) or not item["raw_value"].strip()
+                or item["raw_value"] not in item["evidence"]
+                or not source_text or item["evidence"] not in source_text):
+            field = item.get("field") if isinstance(item, dict) else None
+            return failed_response(["CONTENT_FACTS_EVIDENCE_INVALID"], validation_diagnostic={
+                "stage": "normalized_facts", "rule": "allowlisted_field_raw_value_and_exact_source_excerpt",
+                "item_index": index, "field": field if isinstance(field, str) and field in CONTENT_NORMALIZED_FACT_FIELDS else None,
+            })
+        extracted_fields.add(item["field"])
+    if len(extracted_fields) != len(normalized_facts):
+        return failed_response(["CONTENT_FACTS_SCHEMA_INVALID"], validation_diagnostic={
+            "stage": "normalized_facts", "rule": "one_proposal_per_field"})
+    safe_conflicts = sorted({value for value in conflicts
+                             if isinstance(value, str) and value in CONTENT_NORMALIZED_FACT_FIELDS})
+    if len(safe_conflicts) != len(set(conflicts)):
+        return failed_response(["CONTENT_SOURCE_CONFLICT_SCHEMA_INVALID"], validation_diagnostic={
+            "stage": "source_conflicts", "rule": "allowlisted_field_names_only"})
+    allowed.update(extracted_fields)
     bodies = []
     for item in variants:
         if not isinstance(item, dict) or not isinstance(item.get("body"), str) or not item["body"].strip():
             return failed_response(["CONTENT_SCHEMA_INVALID"])
         facts_used = item.get("facts_used")
         if (not isinstance(facts_used, list) or not all(isinstance(value, str) for value in facts_used)
-                or len(facts_used) != len(set(facts_used)) or not set(facts_used).issubset(allowed)):
+                or len(facts_used) != len(set(facts_used)) or not set(facts_used).issubset(allowed)
+                or set(facts_used).intersection(safe_conflicts)):
             unknown = ([value for value in facts_used if value not in allowed]
                        if isinstance(facts_used, list) and all(isinstance(value, str) for value in facts_used) else [])
             return failed_response(["CONTENT_FACTS_UNGROUNDED"], validation_diagnostic={
@@ -202,7 +213,7 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
                "content_variant_ids": [x["content_variant_id"] for x in output], "media_analysis": "NOT_SENT"}
     return {"status": "PASS", "generation_id": generation_id, "content_batch_id": batch_id,
             "content_variant_ids": receipt["content_variant_ids"], "variants": output, "receipt": receipt,
-            "normalized_facts": normalized_facts, "missing_fields": missing_fields, "conflicts": [],
+            "normalized_facts": normalized_facts, "missing_fields": missing_fields, "conflicts": safe_conflicts,
             "published": False, "mutated_property_store": False, "media_analysis": "NOT_SENT"}
 
 

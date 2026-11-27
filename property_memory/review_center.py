@@ -228,6 +228,10 @@ class ReviewCenter:
         edit = {"revision": package["review_revision"], "field": canonical_field, "previous_value": deepcopy(old), "new_value": deepcopy(value), "origin": "OWNER_CONFIRMED", "owner_id": owner_id, "edited_at": package["updated_at"]}
         package["owner_edits"].append(edit); facts[canonical_field] = value
         package["candidate"].setdefault("owner_confirmed_facts", {})[canonical_field] = value
+        conflict_aliases = {canonical_field, field}
+        if canonical_field == "price_type": conflict_aliases.update({"transaction_type", "transactionType"})
+        package["candidate"]["conflicts"] = [item for item in package["candidate"].get("conflicts", [])
+            if not isinstance(item, dict) or item.get("field") not in conflict_aliases]
         marker_aliases = {
             "title": {"title", "name"}, "address": {"address", "location", "relative_location"},
             "area": {"area", "general_area"}, "property_type": {"property_type", "propertytype"},

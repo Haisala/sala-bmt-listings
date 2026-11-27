@@ -6,6 +6,12 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const source = fs.readFileSync("admin/admin_server.py", "utf8");
+const workflowSource = fs.readFileSync("admin/intake_workflow_ui.py", "utf8");
+assert.match(workflowSource, /Thông tin sản phẩm/);
+assert.match(workflowSource, /XÁC NHẬN & TIẾP TỤC/);
+assert.match(workflowSource, /owner-variant-picker/);
+assert.match(workflowSource, /TẠO LẠI 5 CONTENT THEO DỮ KIỆN MỚI/);
+assert.match(source, /refresh_requested = payload\.get\("refresh_content"\) is True/);
 const start = source.indexOf("const contentRequestsInFlight=new Set();function contentRequestKey");
 assert.notEqual(start, -1, "actual Intake Content UI handler exists");
 const end = source.indexOf("\nconst isImageFile=", start);
