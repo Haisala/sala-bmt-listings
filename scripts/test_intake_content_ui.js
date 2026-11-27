@@ -7,11 +7,25 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync("admin/admin_server.py", "utf8");
 const workflowSource = fs.readFileSync("admin/intake_workflow_ui.py", "utf8");
+const consentUiSource = fs.readFileSync("admin/one_touch_ui.py", "utf8");
 assert.match(workflowSource, /Thông tin sản phẩm/);
 assert.match(workflowSource, /XÁC NHẬN & TIẾP TỤC/);
 assert.match(workflowSource, /owner-variant-picker/);
 assert.match(workflowSource, /TẠO LẠI 5 CONTENT THEO DỮ KIỆN MỚI/);
 assert.match(source, /refresh_requested = payload\.get\("refresh_content"\) is True/);
+assert.match(source, /closest\('#missing-fields-dialog'\)\?\.querySelector\('#missing-fields-status'\)/,
+  "pre-dispatch failures must be visible inside the dialog");
+assert.match(source, /window\.openMissingFields\?\.\(pendingSavedIntakeId/,
+  "new Intake opens rights/consent UI before any generation request");
+assert.doesNotMatch(source, /createContent\(pendingSavedIntakeId,saveIntake\)/,
+  "Intake save is not an implicit Content generation request");
+assert.match(consentUiSource, /Quyền nguồn &amp; tạo Content/);
+assert.match(consentUiSource, /TẠO 5 CONTENT/);
+assert.match(consentUiSource, /Quay lại/);
+assert.match(consentUiSource, /record\?\.contentConsent\?\.external_text_processing_consent===true/,
+  "only server-projected, revision-scoped consent is reused");
+assert.match(consentUiSource, /AI-proposed facts are reviewed on Screen A/);
+assert.doesNotMatch(consentUiSource, /BỔ SUNG & TIẾP TỤC TẠO CONTENT/);
 const start = source.indexOf("const contentRequestsInFlight=new Set();function contentRequestKey");
 assert.notEqual(start, -1, "actual Intake Content UI handler exists");
 const end = source.indexOf("\nconst isImageFile=", start);
@@ -74,6 +88,20 @@ async function main() {
   assert.equal(alreadyDisabled.disabled, false, "button is re-enabled after a blocked response");
   assert.equal(prerequisiteContext.localStore.size, 0, "a confirmed zero-dispatch prerequisite block may rotate the key");
 
+  let modalText = "";
+  const modalStatus = { className: "", set textContent(value) { modalText = value; }, get textContent() { return modalText; } };
+  const failedPreflight = makeContext({
+    fetch: async () => ({ status: 422, json: async () => ({
+      error: "CONTENT_INPUT_LIMIT_EXCEEDED", provider_calls: 0, dispatch_started: false, published: false,
+    }) }),
+  });
+  const modalButton = { disabled: false, closest: (selector) => selector === "#missing-fields-dialog"
+    ? { querySelector: () => modalStatus } : null };
+  assert.equal(await failedPreflight.context.runCreateContent("TEST_ONLY-intake-resume", modalButton, true, true), false);
+  assert.match(modalText, /CONTENT_INPUT_LIMIT_EXCEEDED/);
+  assert.match(modalText, /AI chưa được gọi/);
+  assert.equal(failedPreflight.localStore.size, 0, "confirmed zero-dispatch error allows safe key rotation");
+
   const consentContext = makeContext({
     fetch: async (_url, options) => {
       assert.equal(JSON.parse(options.body).external_text_processing_consent, true);
@@ -96,6 +124,7 @@ async function main() {
   });
   assert.equal(await approvedContext.context.runCreateContent("TEST_ONLY-intake-resume",
     { disabled: true, closest: () => null }, true, true), true);
+  assert.match(approvedContext.status.textContent, /Đã tạo 5 bản nháp riêng tư/);
 
   let resolveFirst;
   posts = [];

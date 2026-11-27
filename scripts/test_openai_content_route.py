@@ -62,6 +62,8 @@ def main():
     intake={"id":"TEST_ONLY-intake-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-fixture",
       "note":"TEST_ONLY synthetic 72 square meter home in TEST_ONLY district",
       "preliminaryFacts":{"title":"TEST_ONLY-home","property_type":"HOUSE","transaction_type":"SALE","price_vnd":1000000000,"address":"TEST_ONLY address","area":"72 m²","house_type":"TEST_ONLY house","bedrooms":2,"bathrooms":1},
+      "factProvenance":{"title":{"evidence_excerpt":"synthetic 72 square meter"},
+        "address":{"evidence_excerpt":"TEST_ONLY district"}},
       "ownerEvidence":{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"},
       "media":[{"media_id":f"TEST_ONLY-media-{i:02d}","filename":f"TEST_ONLY-{i:02d}.jpg",
                 "path":f"inbox/TEST_ONLY/{i:02d}.jpg","sha256":f"{i:064x}","bytes":128}
@@ -96,7 +98,9 @@ def main():
       assert intake["status"]=="CONTENT_CREATED" and intake["contentReviewId"]==body["review_id"]
       assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
       assert len(center.packages[body["review_id"]]["candidate"]["media"])==10
-      assert provider.last_payload["media"]==[] and intake["note"] in provider.last_payload.get("source_text","")
+      assert provider.last_payload["media"]==[]
+      assert "synthetic 72 square meter" in provider.last_payload.get("source_text","")
+      assert provider.last_payload.get("source_text","") != intake["note"]
       assert body["generation"]["content_variant_ids"]==[v["content_variant_id"] for v in body["variants"]]
       assert all(v["intake_id"]==intake["id"] and v["review_id"]==body["review_id"]
                  and v["review_revision"]==body["review_revision"]
@@ -216,10 +220,11 @@ def main():
     http_center=ReviewCenter(http_store,reliability=ReliabilityBoundary(noop.audit,noop.enqueue))
     http_intake={"id":"TEST_ONLY-intake-http-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-http-fixture",
       "note":"TEST_ONLY Apartment available for rent; address EcoCity.","preliminaryFacts":{"transaction_type":"RENT"},
+      "factProvenance":{"title":{"evidence_excerpt":"TEST_ONLY Apartment"}},
       "ownerEvidence":{"source_id":"TEST_ONLY-http-source","claim":"TEST_ONLY source","rights_status":"PERSONAL"},"inputRevision":1,"media":[]}
     (http_private/"index.json").write_text(json.dumps([http_intake]))
-    http_provider=Provider(normalized_facts=[{"field":"title","raw_value":"TEST_ONLY Apartment",
-      "normalized_value":"TEST_ONLY Apartment","evidence":"TEST_ONLY Apartment"}]);http_usage=Usage();sid="TEST_ONLY-session"
+    http_provider=Provider(normalized_facts=[{"field":"title","raw_value":"Apartment",
+      "normalized_value":"TEST_ONLY Apartment","evidence":"Apartment"}]);http_usage=Usage();sid="TEST_ONLY-session"
     env={"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":str(http_root),"BMT_ADMIN_OWNER_ID":"owner",
       "BMT_ADMIN_LOCAL_HTTP_DEV":"1","BMT_ADMIN_PUBLIC_ORIGIN":"","BMT_ADMIN_ALLOWED_IP":"","BMT_ADMIN_SECURE_COOKIE":"0"}
     with patch.dict(os.environ,env,clear=True),patch.object(admin,"PRIVATE_ROOT",http_private),patch.object(admin,"INBOX_ROOT",http_private/"inbox"),\
@@ -246,7 +251,10 @@ def main():
       assert consent_body["provider_calls"]==0 and http_provider.calls==0 and http_center.packages=={}
       consented_request=urllib.request.Request(url,data=json.dumps({"idempotency_key":"TEST_ONLY-http-idempotency-001",
         "source_media_rights_confirmed":True,"external_text_processing_consent":True}).encode(),method="POST",headers=request.headers)
-      with urllib.request.urlopen(consented_request,timeout=5) as response: status=response.status;http_body=json.loads(response.read())
+      try:
+        with urllib.request.urlopen(consented_request,timeout=5) as response: status=response.status;http_body=json.loads(response.read())
+      except urllib.error.HTTPError as exc:
+        raise AssertionError(f"TEST_ONLY consented generation returned HTTP {exc.code}: {json.loads(exc.read())}")
       assert status==201 and len(http_body["variants"])==5 and http_body["published"] is False
       saved_package=http_center.packages[http_body["review_id"]]
       assert saved_package["candidate"]["facts"].get("title")=="TEST_ONLY Apartment"

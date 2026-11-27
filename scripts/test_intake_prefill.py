@@ -60,6 +60,23 @@ def main() -> None:
     assert rental_with_incidental_sale_word["facts"]["price_vnd_per_month"] == 6_500_000
     assert not any(x["field"] == "transaction_type" for x in rental_with_incidental_sale_word["conflicts"])
 
+    # Amenity dimensions must not become the property's area/address; dimensions
+    # stay separate facts and never imply a multiplied land area.
+    amenity_note = extract_source_facts(
+        "Biệt thự EcoCity, vị trí cực kỳ thoáng đãng, mặt tiền Đỗ Quyên; "
+        "công viên 5.000m², khu đất 10x25m, giá bán 22 tỷ",
+        intake_id="TEST_ONLY-amenity-area",
+    )
+    assert amenity_note["facts"].get("address") == "Đỗ Quyên"
+    assert "area" not in amenity_note["facts"] and "land_area" not in amenity_note["facts"]
+    assert amenity_note["facts"]["width"] == 10 and amenity_note["facts"]["length"] == 25
+    assert amenity_note["provenance"]["width"]["evidence_excerpt"] == "10x25"
+    explicitly_labeled_area = extract_source_facts(
+        "Nhà phố, diện tích đất 5.000 m², giá bán 4 tỷ",
+        intake_id="TEST_ONLY-localized-area",
+    )
+    assert explicitly_labeled_area["facts"]["land_area"] == 5000
+
     # A conflict persisted by the older parser is stale when today's parser
     # finds one clear transaction. The GET projection clears it without
     # mutating the saved intake; a separately marked Owner conflict remains.
@@ -126,8 +143,21 @@ def main() -> None:
     })
     assert "0901234567" not in provider_facts["address"]
     assert "0901234567" not in provider_excerpt and "owner@example.invalid" not in provider_excerpt
-    assert "https://example.invalid" not in provider_excerpt and len(provider_excerpt) <= 320
+    assert "https://example.invalid" not in provider_excerpt and len(provider_excerpt.encode("utf-8")) <= 360
     assert "full source text is not sent" not in provider_excerpt
+    from property_memory.providers.openai_provider import build_content_request, MAX_CONTENT_INPUT_TOKENS
+    compact_facts, compact_source = admin._provider_content_inputs({
+        "facts": amenity_note["facts"], "fact_provenance": amenity_note["provenance"],
+        "raw": {"note": "TEST_ONLY full source is deliberately excluded"},
+    })
+    bounded_request = build_content_request({"facts": compact_facts, "source_text": compact_source}, "gpt-6-luna")
+    bounded_schema = bounded_request["text"]["format"]["schema"]
+    upper_bound = (len(bounded_request["instructions"].encode()) + len(bounded_request["input"].encode())
+                   + len(json.dumps(bounded_schema, ensure_ascii=False, separators=(",", ":")).encode())
+                   + len("content_five"))
+    assert upper_bound <= MAX_CONTENT_INPUT_TOKENS
+    assert compact_source and all(part in "Biệt thự EcoCity, vị trí cực kỳ thoáng đãng, mặt tiền Đỗ Quyên; công viên 5.000m², khu đất 10x25m, giá bán 22 tỷ"
+                                  for part in compact_source.split(" · "))
 
     decimal_source = "Biệt thự song lập mặt hồ điều hòa EcoCity - 16,5 tỷ; đất 250m² (10x25), xây dựng 400m²"
     decimal_candidate = extract_source_facts(decimal_source, intake_id="TEST_ONLY-decimal", source_revision=4)
@@ -193,6 +223,8 @@ def main() -> None:
         with patch.object(admin, "PRIVATE_ROOT", private), \
              patch.object(admin, "INBOX_ROOT", inbox), \
              patch.object(admin, "INDEX_PATH", private / "index.json"), \
+             patch.object(admin, "AUDIT_LOG_PATH", private / "audit.jsonl"), \
+             patch.object(admin, "ERROR_QUEUE_PATH", private / "error-queue.json"), \
              patch.dict(os.environ, {"BMT_ADMIN_OWNER_ID": "TEST_ONLY-owner"}):
             saved, replayed, _ = admin.create_intake_record(
                 {"source": "TEST_ONLY", "sourceGroup": "TEST_ONLY-prefill", "note": note},

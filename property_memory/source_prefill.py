@@ -63,6 +63,12 @@ def is_placeholder_location(value: Any) -> bool:
     }
 
 
+def _descriptive_location(value: str) -> bool:
+    folded, _ = _fold_with_offsets(value)
+    return bool(re.search(r"\b(?:cuc ky|rat|thoang dang|thoang mat|yen tinh|dep|gan tien ich|"
+                          r"vi tri dep|khu vuc dep|tuyet voi|dang cap)\b", folded))
+
+
 def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int = 1) -> dict[str, Any]:
     """Extract conservative candidate facts plus evidence spans/conflicts."""
     text = str(note or "")
@@ -141,24 +147,37 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
 
     # A location can be a named development/area; this is not treated as an
     # exact street address. Capture only source phrases with explicit context.
-    location_match = re.search(r"\b(?:dia chi|vi tri|khu vuc|toa lac|tai|o)\s*[:=-]?\s*([^\n;.!]{2,100})", folded)
-    if not location_match:
-        location_match = re.search(r"\bmat tien\s+([^,;.!\n]{2,80})", folded)
-    if location_match:
+    location_matches = list(re.finditer(
+        r"\b(?:dia chi|vi tri|khu vuc|toa lac|tai|o)\s*[:=-]?\s*([^\n;.!]{2,100})", folded))
+    location_matches += list(re.finditer(r"\bmat tien\s+([^,;.\n]{2,80})", folded))
+    for location_match in sorted(location_matches,
+                                 key=lambda match: (0 if match.group(0).startswith("mat tien") else 1,
+                                                    match.start())):
         group = location_match.span(1)
         loc, _, _ = _source_span(text, offsets, *group)
         loc = re.split(r"\s+(?:gia|dien tich|rong|dai|xay dung)\b", loc, maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,.-")
-        if loc and not is_placeholder_location(loc):
+        if loc and not is_placeholder_location(loc) and not _descriptive_location(loc):
             put("address", loc, group)
+            break
 
     area_matches = list(re.finditer(r"(?<!\w)(\d+(?:[.,]\d+)?)\s*(?:m\s*2|sqm|met vuong)\b", folded))
     area_candidates: dict[str, list[tuple[Decimal, re.Match[str]]]] = {"area": [], "land_area": [], "construction_area": []}
     for match in area_matches:
+        raw_number = match.group(1)
         try:
-            value = Decimal(match.group(1).replace(",", "."))
+            # Vietnamese thousands notation (e.g. 5.000 m²) is distinct from
+            # a short decimal measurement (e.g. 72.5 m²).
+            value = Decimal(raw_number.replace(".", "").replace(",", ".")
+                            if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", raw_number)
+                            else raw_number.replace(",", "."))
         except InvalidOperation:
             continue
-        context = folded[max(0, match.start() - 36):match.start()]
+        clause_start = max(folded.rfind(mark, 0, match.start()) for mark in (".", ";", "\n")) + 1
+        context = folded[max(clause_start, match.start() - 84):match.start()]
+        clause = folded[clause_start:match.end()]
+        if re.search(r"\b(?:cong vien|ho boi|tien ich|quang truong|duong noi bo|mat nuoc|"
+                     r"san the thao|khuon vien cong cong)\b", clause):
+            continue
         if re.search(r"(xay dung|san xay|dien tich xay|construction)\s*[:=-]?\s*$", context):
             field = "construction_area"
         elif re.search(r"(dat(?: nen)?|khuon vien|dien tich dat|tho cu)\s*[:=-]?\s*$", context):
@@ -171,12 +190,16 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
         if len(unique) == 1:
             value, match = candidates[0]
             display = f"{format(value.normalize(), 'f')} m²"
+            evidence_start = max(0, match.start() - 34)
+            evidence = re.search(r"(?:dien tich(?: dat| san)?|dat|khuon vien)\s*[:=-]?\s*$", folded[evidence_start:match.start()])
+            evidence_span = ((evidence_start + evidence.start(), match.end()) if evidence
+                             else match.span())
             if field in {"land_area", "construction_area"}:
-                put(field, float(value), match.span())
+                put(field, float(value), evidence_span)
                 if field == "land_area" and "area" not in facts:
-                    put("area", display, match.span())
+                    put("area", display, evidence_span)
             else:
-                put("area", display, match.span())
+                put("area", display, evidence_span)
         elif len(unique) > 1:
             conflicts.append({"field": field, "kind": "SOURCE_CONFLICT", "candidates": [float(x) for x in sorted(unique)], "evidence": [_source_span(text, offsets, *m.span())[0] for _, m in candidates]})
 
@@ -184,7 +207,7 @@ def extract_source_facts(note: str, *, intake_id: str = "", source_revision: int
     if dimensions:
         for field, group in (("width", 1), ("length", 2)):
             try:
-                put(field, float(Decimal(dimensions.group(group).replace(",", "."))), dimensions.span(group))
+                put(field, float(Decimal(dimensions.group(group).replace(",", "."))), dimensions.span())
             except InvalidOperation:
                 pass
 

@@ -131,7 +131,7 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
     if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
         raise ValueError("CONTENT_INPUT_REQUIRED")
-    instructions = "Từ source_text trích fact hỗ trợ vào f=[[field,raw,normalized,evidence]], trích dẫn nguyên văn. Không đoán; m=thiếu,c=mâu thuẫn. Dùng facts+f không xung đột tạo đúng 5 bài ngắn tiếng Việt khác nhau; v.f chỉ field dùng. Không gửi ảnh; không tự suy diễn pháp lý, liên hệ, quyền đăng."
+    instructions = "Từ source_text, trích fact có bằng chứng vào f=[field,raw,normalized,evidence], dẫn nguyên văn; m=thiếu,c=mâu thuẫn. Không đoán. Dùng facts và f không xung đột tạo đúng 5 bài ngắn tiếng Việt khác nhau; v.f chỉ field dùng. Không gửi ảnh, không suy diễn pháp lý/liên hệ/quyền đăng."
     def compose(selected_facts: dict[str, Any], include_source: bool = False) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
