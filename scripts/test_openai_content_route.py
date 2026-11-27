@@ -10,6 +10,7 @@ from property_memory import PropertyStore
 from property_memory.intake_review import process_intake
 from property_memory.mutation_service import ReliabilityBoundary
 from property_memory.review_center import ReviewCenter
+from property_memory.providers.openai_provider import ProviderError
 
 DEFAULT_FACTS_USED=object()
 DEFAULT_USAGE=object()
@@ -32,6 +33,9 @@ class Provider:
                 "usage":usage,"provider_request_id":"req_TEST_ONLY"}
         if self.input_fact_keys is not DEFAULT_INPUT_KEYS:result["input_fact_keys"]=self.input_fact_keys
         return result
+class PreflightProvider:
+    provider_name="TEST_ONLY_PREFLIGHT";model="gpt-6-luna"
+    def generate(self,payload): raise ProviderError("CONTENT_INPUT_LIMIT_EXCEEDED","TEST_ONLY bounded failure",dispatch_started=False)
 class Usage:
     def __init__(self):self.rows=[]
     def record(self,**kw):
@@ -46,7 +50,7 @@ def main():
   with tempfile.TemporaryDirectory(prefix="sala-one-touch-test-") as folder:
     root=Path(folder); private=root/"private";private.mkdir(mode=0o700)
     inbox=private/"inbox";inbox.mkdir(mode=0o700)
-    with patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"INBOX_ROOT",inbox),patch.object(admin,"INDEX_PATH",private/"index.json"):
+    with patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"INBOX_ROOT",inbox),patch.object(admin,"INDEX_PATH",private/"index.json"),patch.object(admin,"AUDIT_LOG_PATH",private/"audit.jsonl"),patch.object(admin,"ERROR_QUEUE_PATH",private/"errors.json"):
       saved,replay,_=admin.create_intake_record({"source":"Cá nhân","note":"Giá thuê: 6 triệu/tháng. Căn hộ mặt tiền Tôn Đức Thắng","evidence_source_id":"TEST_ONLY-source","evidence_claim":"TEST_ONLY source claim","evidence_rights":"PERSONAL"},[],supplied_key="TEST_ONLY-intake-evidence-save-001")
       assert saved["preliminaryFacts"]["price_vnd_per_month"]==6000000 and saved["preliminaryFacts"]["price_cycle"]=="MONTH"
       assert saved["ownerEvidence"]["source_id"].startswith("intake:") and saved["ownerEvidence"]["rights_status"]=="PERSONAL"
@@ -71,7 +75,7 @@ def main():
     handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center)
     records=[intake,missing]
     with patch.dict(os.environ,{"BMT_ENV":"test","BMT_TEST_ONLY":"1","SALA_E2E_ROOT":folder,"BMT_ADMIN_OWNER_ID":"owner"}), \
-         patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"HOST","127.0.0.1"), \
+         patch.object(admin,"PRIVATE_ROOT",private),patch.object(admin,"AUDIT_LOG_PATH",private/"audit.jsonl"),patch.object(admin,"ERROR_QUEUE_PATH",private/"errors.json"),patch.object(admin,"HOST","127.0.0.1"), \
          patch.object(admin,"_CONTENT_LIVE_ENABLED",True),patch.object(admin,"_AI_PROVIDER",provider),patch.object(admin,"_USAGE_LEDGER",usage), \
          patch.object(admin,"load_index",lambda:records),patch.object(admin,"save_index",lambda items:None):
       before_packages=len(center.packages)
@@ -141,6 +145,36 @@ def main():
       assert unknown_replay["value"]["error"]=="CONTENT_REQUEST_OUTCOME_UNKNOWN"
       assert unknown_replay["value"]["previous_attempt_unverified"] is True
       assert provider.calls==1 and len(usage.rows)==1 and store.list_properties()==[]
+      attempted_unknown_retry=call(handler,uncertain_intake["id"],"TEST_ONLY-ambiguous-retry-004",{"retry_preflight":True})
+      assert attempted_unknown_retry["status"]==409
+      assert attempted_unknown_retry["value"]["error"]=="CONTENT_REQUEST_OUTCOME_UNKNOWN"
+      assert provider.calls==1 and len(usage.rows)==1
+      safe_intake={"id":"TEST_ONLY-intake-preflight","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-preflight",
+        "note":"TEST_ONLY synthetic source","preliminaryFacts":dict(intake["preliminaryFacts"]),
+        "ownerEvidence":dict(intake["ownerEvidence"]),"media":[]}
+      records.append(safe_intake)
+      with patch.object(admin,"_AI_PROVIDER",PreflightProvider()),patch.object(admin,"_USAGE_LEDGER",Usage()):
+        preflight=call(handler,safe_intake["id"],"TEST_ONLY-preflight-first-001")
+      assert preflight["status"]==422 and preflight["value"]["error"]=="CONTENT_INPUT_LIMIT_EXCEEDED"
+      assert preflight["value"]["provider_calls"]==0 and preflight["value"]["dispatch_started"] is False
+      safe_package=next(p for p in center.packages.values() if p["candidate"]["intake_id"]==safe_intake["id"])
+      status=admin.content_attempt_status(safe_intake["id"],safe_intake,center)
+      assert status["state"]=="SAFE_RETRY_AVAILABLE" and status["can_retry"] is True
+      assert status["consent"]=={"source_media_rights_confirmed":True,"external_text_processing_consent":True}
+      assert admin.reusable_content_consent(safe_package,{**safe_intake,"inputRevision":2},"gpt-6-luna")=={
+        "source_media_rights_confirmed":False,"external_text_processing_consent":False}
+      assert admin.reusable_content_consent(safe_package,safe_intake,"different-model")=={
+        "source_media_rights_confirmed":False,"external_text_processing_consent":False}
+      blocked_retry=call(handler,safe_intake["id"],"TEST_ONLY-preflight-without-confirmation-002",
+        {"source_media_rights_confirmed":False,"external_text_processing_consent":False})
+      assert blocked_retry["status"]==409 and blocked_retry["value"]["error"]=="CONTENT_SAFE_RETRY_CONFIRMATION_REQUIRED"
+      retry_provider=Provider();retry_usage=Usage()
+      with patch.object(admin,"_AI_PROVIDER",retry_provider),patch.object(admin,"_USAGE_LEDGER",retry_usage):
+        retried=call(handler,safe_intake["id"],"TEST_ONLY-preflight-explicit-retry-003",
+          {"source_media_rights_confirmed":False,"external_text_processing_consent":False,"retry_preflight":True})
+      assert retried["status"]==201 and len(retried["value"]["variants"])==5
+      assert retry_provider.calls==1 and len(retry_usage.rows)==1 and store.list_properties()==[]
+      assert len(safe_package["content_generation_requests"])==2
       denied=SimpleNamespace(owner_id=lambda:None,review_center_or_error=lambda:center,send_json=lambda v,status=200:None)
       denied_out=call(denied,intake["id"],"TEST_ONLY-anonymous-key-001")
       assert denied_out["status"]==403 and provider.calls==1
@@ -286,7 +320,7 @@ def main():
     passthrough={"title":"Căn hộ ở Đắk Lắk","area":"72 m²","optional":None}
     request=build_content_request({"facts":passthrough,"source_text":"Giá thuê 6 triệu/tháng; căn hộ 72 m²"},"gpt-6-luna")
     sent=json.loads(request["input"])["facts"]
-    assert sent=={"area":passthrough["area"]}  # request budget permits this field with source text
+    assert sent=={"title":passthrough["title"],"area":passthrough["area"]}  # priority facts fit with the optional source excerpt
     assert json.loads(request["input"])["source_text"]=="Giá thuê 6 triệu/tháng; căn hộ 72 m²"
     priced=json.loads(build_content_request({"facts":{"title":"Căn hộ Đắk Lắk","price_vnd_per_month":6000000}},"gpt-6-luna")["input"])["facts"]
     assert priced.get("price_vnd_per_month")==6000000 and isinstance(priced["price_vnd_per_month"],int)
@@ -364,6 +398,23 @@ def main():
     assert linked.get("content_variant_id")==approved_variant["content_variant_id"]
     assert center.packages[gate_package["review_id"]]["state"]=="APPROVED"
     assert len(store.list_properties())==1
+    no_content_intake={"id":"TEST_ONLY-intake-gate-a-no-content","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-gate-a",
+      "note":"TEST_ONLY synthetic no-content candidate","preliminaryFacts":{"title":"TEST_ONLY independent property",
+      "property_type":"HOUSE","transaction_type":"SALE","price_vnd":2100000000,
+      "address":"TEST_ONLY independent address","area":"88 m²","house_type":"TEST_ONLY house",
+      "bedrooms":3,"bathrooms":2},"ownerEvidence":{"source_id":"TEST_ONLY-source-independent",
+      "claim":"TEST_ONLY synthetic rights evidence","rights_status":"COMPANY"},"media":[]}
+    no_content_package=process_intake(store,center,no_content_intake,ai_gateway=None,operation_id=no_content_intake["id"])
+    approved_without_content=center.approve(no_content_package["review_id"],expected_revision=1,owner_id="owner",
+      decision="CREATE_NEW_PROPERTY",idempotency_key="TEST_ONLY-gate-a-without-content-001")
+    assert approved_without_content["state"]=="APPROVED"
+    assert not approved_without_content.get("selected_content")
+    assert approved_without_content["mutation_result"]["property_id"]
+    assert len(approved_without_content.get("content_batches",[]))==0
+    ui=Path(__file__).resolve().parents[1]/"admin"/"intake_workflow_ui.py"
+    ui_text=ui.read_text(encoding="utf-8")
+    assert "approve.disabled=approve.disabled||(hasVariants&&!selected)" not in ui_text
+    assert "Gate A chỉ duyệt dữ kiện" in ui_text
     store.close()
   print("PASS: one mock generation → five private drafts → select before Gate A → Gate A → linked public_web draft approval; no publication")
 if __name__=="__main__":main()

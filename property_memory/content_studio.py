@@ -90,8 +90,22 @@ def build_generative_content_batch(*, generation_id: str, facts: dict[str, Any],
     try:
         response = provider.generate(payload)
     except Exception as exc:
+        dispatch_started = getattr(exc, "dispatch_started", None)
+        provider_calls = 0 if dispatch_started is False else 1
+        if dispatch_started is False:
+            code = getattr(exc, "code", None)
+            if not isinstance(code, str) or not re.fullmatch(r"CONTENT_[A-Z0-9_]{1,80}", code):
+                code = "CONTENT_PREFLIGHT_REJECTED"
+            return {"status": "BLOCKED", "reason_codes": [code], "published": False,
+                    "mutated_property_store": False, "variants": [], "receipt": None,
+                    "provider_calls": 0, "dispatch_started": False}
         record_attempt(outcome="FAILED", usage=None, request_id=None)
-        return {"status": "BLOCKED", "reason_codes": ["CONTENT_PROVIDER_ERROR", type(exc).__name__], "published": False, "variants": []}
+        code = getattr(exc, "code", None)
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", code):
+            code = "CONTENT_PROVIDER_ERROR"
+        return {"status": "BLOCKED", "reason_codes": [code], "published": False,
+                "mutated_property_store": False, "variants": [], "provider_calls": provider_calls,
+                "dispatch_started": dispatch_started}
     variants = response.get("variants") if isinstance(response, dict) else None
     normalized_facts = response.get("normalized_facts") if isinstance(response, dict) else None
     missing_fields = response.get("missing_fields") if isinstance(response, dict) else None

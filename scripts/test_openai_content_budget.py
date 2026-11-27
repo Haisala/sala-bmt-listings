@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from property_memory.providers.openai_provider import (
     MAX_CONTENT_REQUEST_BYTES, MAX_CONTENT_INPUT_TOKENS, CONTENT_VARIANT_COUNT,
@@ -39,10 +40,30 @@ def main():
            len(json.dumps(schema,ensure_ascii=False,separators=(",",":" )).encode())+len("content_five"))
     assert upper<=MAX_CONTENT_INPUT_TOKENS and size<MAX_CONTENT_REQUEST_BYTES
     assert request["max_output_tokens"]==900 and _content_cost_upper_bound(size,900)<0.01
-    fact_enum=schema["properties"]["v"]["items"]["properties"]["f"]["items"]["enum"]
-    assert set(fact_enum)==set(sent) and "owner_contact" not in fact_enum
+    fact_key_schema=schema["properties"]["v"]["items"]["properties"]["f"]["items"]
+    assert fact_key_schema=={"type":"string"}, "server-side grounded-fact validation owns the allowlist"
     assert schema["properties"]["f"]["maxItems"]==0
-    assert "top-level f must be empty" in request["instructions"]
+    assert "f cấp cao nhất để rỗng" in request["instructions"]
+    long_facts={"title":"Căn hộ TEST_ONLY nội thất đầy đủ","property_type":"APARTMENT",
+      "address":"EcoCity, mặt tiền Tôn Đức Thắng","area":"62 m²","price_vnd_per_month":6000000,
+      "price_type":"RENT","house_type":"APARTMENT","description":"TEST_ONLY mô tả chi tiết "*14,
+      "bedrooms":2,"features":["đầy đủ nội thất","gần tiện ích"],"legal_status":"TEST_ONLY"}
+    compact=build_content_request({"facts":long_facts,"source_text":"Giá thuê 6 triệu/tháng, căn hộ đầy đủ nội thất, mặt tiền Tôn Đức Thắng."},"gpt-6-luna")
+    compact_input=json.loads(compact["input"])
+    compact_schema=compact["text"]["format"]["schema"]
+    compact_upper=(len(compact["instructions"].encode())+len(compact["input"].encode())+
+      len(json.dumps(compact_schema,ensure_ascii=False,separators=(",",":")).encode())+len("content_five"))
+    assert compact_upper<=MAX_CONTENT_INPUT_TOKENS
+    assert "source_text" not in compact_input, "optional raw excerpt must yield budget to revision-bound facts"
+    assert {"title","address","area","price_vnd_per_month","price_type"}.issubset(compact_input["facts"])
+    preflight_transport=Transport({"v":compact_variants(),"f":[],"m":[],"c":[]})
+    with patch("property_memory.providers.openai_provider.build_content_request",
+               side_effect=ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")):
+        try: OpenAIPropertyProvider(api_key="TEST_ONLY_KEY",transport=preflight_transport).generate({"facts":facts})
+        except ProviderError as exc:
+            assert exc.code=="CONTENT_INPUT_LIMIT_EXCEEDED" and exc.dispatch_started is False
+        else: raise AssertionError("pre-dispatch input limit accepted")
+    assert preflight_transport.calls==0, "preflight error must not enter network transport"
     try: build_content_request({"facts":{},"source_text":""},"gpt-6-luna")
     except ValueError as e: assert str(e)=="CONTENT_INPUT_REQUIRED"
     else: raise AssertionError("empty prompt accepted")

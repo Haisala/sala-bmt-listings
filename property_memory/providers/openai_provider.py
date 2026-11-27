@@ -75,9 +75,10 @@ MAX_CONTENT_OUTPUT_TOKENS = 900
 MAX_CONTENT_COST_USD = 0.01
 
 class ProviderError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False, diagnostics: dict[str, Any] | None = None):
+    def __init__(self, code: str, message: str, *, retryable: bool = False,
+                 diagnostics: dict[str, Any] | None = None, dispatch_started: bool | None = None):
         super().__init__(message[:240]); self.code = code; self.retryable = retryable
-        self.diagnostics = diagnostics or {}
+        self.diagnostics = diagnostics or {}; self.dispatch_started = dispatch_started
 
 class Transport(Protocol):
     def send(self, payload: dict[str, Any], api_key: str, *, timeout: float) -> dict[str, Any]: ...
@@ -133,18 +134,15 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         raise ValueError("CONTENT_SOURCE_LIMIT_INVALID")
     if not any(value not in (None, "") for value in facts.values()) and not (isinstance(source_text, str) and source_text.strip()):
         raise ValueError("CONTENT_INPUT_REQUIRED")
-    instructions = ("Use supplied facts only; never invent. Return 5 distinct Vietnamese drafts. "
-                    "For each variant, f lists only exact supplied fact keys, never values. "
-                    "Do not extract, normalize, or emit facts/evidence; top-level f must be empty because facts are already normalized and revision-bound.")
-    def compose(selected_facts: dict[str, Any]) -> dict[str, Any]:
+    instructions = ("Dùng đúng facts, không bịa. Tạo đúng 5 mẫu tiếng Việt khác nhau. "
+                    "Trong v[].f chỉ ghi key có trong facts; f cấp cao nhất để rỗng.")
+    def compose(selected_facts: dict[str, Any], include_source: bool = False) -> dict[str, Any]:
         # Lineage identifiers remain attached to the saved batch/receipt; the
         # model needs only approved facts, so do not spend prompt tokens on IDs.
         allowed = {"facts": selected_facts}
-        if isinstance(source_text, str) and source_text.strip():
+        if include_source and isinstance(source_text, str) and source_text.strip():
             allowed["source_text"] = source_text
         schema = json.loads(json.dumps(CONTENT_RESPONSE_SCHEMA))
-        identifiers = list(selected_facts) or list(CONTENT_FACT_PRIORITY)
-        schema["properties"]["v"]["items"]["properties"]["f"]["items"]["enum"] = identifiers
         request = {"model": model, "instructions": instructions,
                    "input": json.dumps(allowed, ensure_ascii=False, separators=(",", ":")),
                    "reasoning": {"effort": "low"},
@@ -174,6 +172,13 @@ def build_content_request(payload: dict[str, Any], model: str, *, max_output_tok
         if bounded is not None:
             selected = candidate
             request = bounded
+    # Source excerpts are optional evidence retained in provenance. Facts take
+    # priority under the hard input cap; include the excerpt only if it fits
+    # without dropping any selected facts.
+    if request is not None and isinstance(source_text, str) and source_text.strip():
+        with_source = compose(selected, include_source=True)
+        if with_source is not None:
+            request = with_source
     if request is None:
         raise ValueError("CONTENT_INPUT_LIMIT_EXCEEDED")
     request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -293,14 +298,27 @@ class OpenAIPropertyProvider:
         key = self.api_key
         if key is None:
             try: key = self._credential_resolver()
-            except CredentialError as exc: raise ProviderError(exc.code, "OpenAI credential is not configured") from None
-            except Exception: raise ProviderError("MISSING_CREDENTIAL", "OpenAI credential is not configured") from None
-        request_payload = build_content_request(payload, self.model)
+            except CredentialError as exc: raise ProviderError(exc.code, "OpenAI credential is not configured", dispatch_started=False) from None
+            except Exception: raise ProviderError("MISSING_CREDENTIAL", "OpenAI credential is not configured", dispatch_started=False) from None
+        try:
+            request_payload = build_content_request(payload, self.model)
+        except (ValueError, TypeError, OverflowError) as exc:
+            code = str(exc)
+            if code not in {"CONTENT_INPUT_LIMIT_EXCEEDED", "CONTENT_COST_CAP_EXCEEDED",
+                            "CONTENT_INPUT_REQUIRED", "CONTENT_SOURCE_LIMIT_INVALID",
+                            "CONTENT_MODEL_OR_OUTPUT_CAP_INVALID"}:
+                code = "CONTENT_PREFLIGHT_REJECTED"
+            raise ProviderError(code, "Content request rejected before provider dispatch",
+                                dispatch_started=False) from None
         try:
             response = self.transport.send(request_payload, key, timeout=self.timeout)
         except ProviderError as exc:
             exc.diagnostics.setdefault("model", self.model)
+            exc.dispatch_started = True
             raise
+        except Exception:
+            raise ProviderError("PROVIDER_TRANSPORT", "OpenAI provider transport failure",
+                                retryable=True, dispatch_started=True) from None
         try:
             value = _response_json(response)
         except ProviderError as exc:

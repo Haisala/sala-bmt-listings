@@ -1468,14 +1468,101 @@ def project_intake_admin_list_item(record: dict[str, Any], center: ReviewCenter 
                 provider_calls = int(response.get("provider_calls") or 0)
             except (TypeError, ValueError):
                 provider_calls = 0
-            if latest.get("status") == "IN_PROGRESS" or provider_calls > 0:
+            if latest.get("status") == "IN_PROGRESS" or provider_calls > 0 or response.get("dispatch_started") is True:
                 item["contentAttemptState"] = "OUTCOME_UNVERIFIED"
             elif latest.get("status") == "SUCCEEDED":
                 item["contentAttemptState"] = "SUCCEEDED"
+            elif response.get("dispatch_started") is False and response.get("error") in CONTENT_SAFE_PREFLIGHT_ERRORS:
+                item["contentAttemptState"] = "SAFE_PREFLIGHT_FAILURE"
             elif latest.get("status") == "BLOCKED":
                 item["contentAttemptState"] = "BLOCKED_NO_PROVIDER"
+            consent = reusable_content_consent(package, record, _AI_PROVIDER.model)
+            if any(consent.values()):
+                item["contentConsent"] = consent
         break
     return item
+
+
+CONTENT_CONSENT_DESTINATION = "OPENAI_PRIVATE_CONTENT_DRAFT"
+CONTENT_CONSENT_VERSION = 1
+CONTENT_SAFE_PREFLIGHT_ERRORS = {"CONTENT_INPUT_LIMIT_EXCEEDED", "CONTENT_COST_CAP_EXCEEDED"}
+
+
+def content_consent_scope(record: dict[str, Any], model: str) -> str:
+    media = []
+    for item in record.get("media", []) if isinstance(record.get("media"), list) else []:
+        if isinstance(item, dict):
+            media.append(str(item.get("sha256") or item.get("mediaId") or item.get("media_id") or ""))
+    evidence = record.get("ownerEvidence") if isinstance(record.get("ownerEvidence"), dict) else {}
+    scope = {"v": CONTENT_CONSENT_VERSION, "intake_id": record.get("id"),
+             "input_revision": int(record.get("inputRevision", 1)), "destination": CONTENT_CONSENT_DESTINATION,
+             "model": model, "rights_status": evidence.get("rights_status"), "media": media}
+    encoded = json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def reusable_content_consent(package: dict[str, Any] | None, record: dict[str, Any], model: str) -> dict[str, bool]:
+    if not isinstance(package, dict):
+        return {"source_media_rights_confirmed": False, "external_text_processing_consent": False}
+    scope = content_consent_scope(record, model)
+    revision = int(record.get("inputRevision", 1))
+    requests = package.get("content_generation_requests")
+    if not isinstance(requests, list):
+        return {"source_media_rights_confirmed": False, "external_text_processing_consent": False}
+    for item in reversed(requests):
+        if not isinstance(item, dict):
+            continue
+        if (item.get("consent_scope") == scope and item.get("consent_input_revision") == revision
+                and item.get("consent_destination") == CONTENT_CONSENT_DESTINATION
+                and item.get("consent_model") == model):
+            return {"source_media_rights_confirmed": item.get("source_media_rights_confirmed") is True,
+                    "external_text_processing_consent": item.get("external_text_processing_consent") is True}
+    return {"source_media_rights_confirmed": False, "external_text_processing_consent": False}
+
+
+def content_attempt_status(intake_id: str, record: dict[str, Any], center: ReviewCenter | None) -> dict[str, Any]:
+    package = next((item for item in (center.packages.values() if center else [])
+                    if str((item.get("candidate") or {}).get("intake_id") or "") == intake_id), None)
+    if package is None:
+        return {"intake_id": intake_id, "state": "NO_ATTEMPT", "provider_calls": 0,
+                "can_retry": False, "consent": {"source_media_rights_confirmed": False,
+                "external_text_processing_consent": False}}
+    requests = package.get("content_generation_requests") if isinstance(package.get("content_generation_requests"), list) else []
+    latest = requests[-1] if requests and isinstance(requests[-1], dict) else None
+    response = latest.get("response") if latest and isinstance(latest.get("response"), dict) else {}
+    try:
+        provider_calls = max(0, int(response.get("provider_calls") or 0))
+    except (TypeError, ValueError):
+        provider_calls = 0
+    consent = reusable_content_consent(package, record, _AI_PROVIDER.model)
+    if not latest:
+        state, error, can_retry = "NO_ATTEMPT", None, False
+    elif latest.get("status") == "SUCCEEDED":
+        state, error, can_retry = "SUCCEEDED", None, False
+    elif latest.get("status") == "IN_PROGRESS" or provider_calls > 0 or response.get("dispatch_started") is True:
+        state, error, can_retry = "OUTCOME_UNVERIFIED", "CONTENT_REQUEST_OUTCOME_UNKNOWN", False
+    elif response.get("dispatch_started") is not False:
+        state, error, can_retry = "OUTCOME_UNVERIFIED", "CONTENT_REQUEST_OUTCOME_UNKNOWN", False
+    else:
+        error = response.get("error") if isinstance(response.get("error"), str) else None
+        def same_input_revision(item: dict[str, Any]) -> bool:
+            try:
+                return int(item.get("input_revision", -1)) == int(record.get("inputRevision", 1))
+            except (TypeError, ValueError):
+                return False
+        safe_failures = [item for item in requests
+                         if isinstance(item, dict) and isinstance(item.get("response"), dict)
+                         and item.get("response", {}).get("dispatch_started") is False
+                         and item.get("response", {}).get("error") in CONTENT_SAFE_PREFLIGHT_ERRORS
+                         and same_input_revision(item)]
+        can_retry = bool(error in CONTENT_SAFE_PREFLIGHT_ERRORS and len(safe_failures) == 1
+                         and latest.get("status") == "BLOCKED"
+                         and latest.get("input_revision") == int(record.get("inputRevision", 1)))
+        state = "SAFE_RETRY_AVAILABLE" if can_retry else ("RETRY_LIMIT_REACHED" if len(safe_failures) >= 2 else "BLOCKED")
+    return {"intake_id": intake_id, "review_id": package.get("review_id"), "state": state,
+            "error": error, "provider_calls": provider_calls, "dispatch_started": response.get("dispatch_started"),
+            "input_revision": int(record.get("inputRevision", 1)), "can_retry": can_retry, "consent": consent,
+            "content_batch_count": len(package.get("content_batches", []))}
 
 
 def validate_evidence_payload(value: Any) -> dict[str, Any]:
@@ -1712,8 +1799,9 @@ const $=s=>document.querySelector(s);const mojibake={'C�� nh��n':'Cá nh
 async function loadReviews(){const r=await fetch('/api/reviews');const d=await r.json();if(!r.ok){$('#reviews').textContent=d.error||'Không tải được review';return}$('#reviews').innerHTML=d.length?d.map(x=>`<div class="item"><button class="secondary" data-review="${esc(x.review_id)}">Mở</button> <b>${esc(x.state)}</b> · ${esc(x.source||'')} · ${esc(x.intake_id||'')} · revision ${x.review_revision}</div>`).join(''):'Chưa có review.';document.querySelectorAll('[data-review]').forEach(b=>b.onclick=()=>loadReview(b.dataset.review))}
 async function loadReview(id){const r=await fetch('/api/reviews/'+encodeURIComponent(id));const x=await r.json();if(!r.ok){$('#review-detail').textContent=x.error;return}const ia=x.internal_analysis||{},ds=ia.deal_score||{};$('#review-detail').innerHTML=`<div class="item"><h3>${esc(x.state)} · revision ${x.review_revision}</h3><h4>Nguồn / provenance</h4><pre>${esc(JSON.stringify(x.candidate?.raw||x.candidate?.provenance||{},null,2))}</pre><h4>Property facts</h4><pre>${esc(JSON.stringify(x.candidate?.facts||{},null,2))}</pre><h4>Thiếu / chưa Owner xác nhận</h4><pre>${esc(JSON.stringify(x.candidate?.missing_fields||[],null,2))}</pre><h4>Market / Comparable / Valuation</h4><pre>${esc(JSON.stringify({snapshot:x.market_snapshot?.market_snapshot_id,comparables:x.comparable_set?.status,valuation:x.valuation?.valuation_summary||x.valuation},null,2))}</pre><h4>AI Internal Analysis · PRIVATE</h4><pre>${esc(JSON.stringify({score:ds, strengths:ia.strengths, risks:ia.weaknesses_risks, anomalies:ia.anomalies, missing:ia.missing_information, questions:ia.questions_to_verify, recommendation:ia.recommended_action, confidence:ia.confidence},null,2))}</pre><p class="err">${x.state==='STALE_REVIEW'?'Phân tích đã cũ; không thể duyệt.':''}</p><label>Sửa field</label><input id="review-field" placeholder="ví dụ transaction_type, price_vnd_per_month, house_type, bedrooms"><input id="review-value" placeholder="Giá trị mới"><button data-edit-review>SAVE REVIEW REVISION</button> <button data-approve-review ${x.state==='STALE_REVIEW'||x.state==='REJECTED'?'disabled':''}>DUYỆT GATE A</button> <button data-reject-review>BỎ / TỪ CHỐI</button><p id="review-msg"></p></div>`;document.querySelector('[data-edit-review]').onclick=()=>reviewAction(id,'edit',x.review_revision,{field:$('#review-field').value,value:$('#review-value').value,owner_id:'owner'});document.querySelector('[data-approve-review]').onclick=()=>reviewAction(id,'approve',x.review_revision,{decision:'CREATE_NEW_PROPERTY',idempotency_key:'ui:'+id+':'+x.review_revision,owner_id:'owner'});document.querySelector('[data-reject-review]').onclick=()=>reviewAction(id,'reject',x.review_revision,{reason:'Owner rejected',owner_id:'owner'})}
 async function reviewAction(id,kind,revision,extra){const r=await fetch('/api/reviews/'+id+'/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:revision,...extra})});const d=await r.json();const gateErrors={MISSING_FIELDS_REQUIRE_OWNER:'Cần Owner bổ sung/xác nhận trường bắt buộc theo loại BĐS.',PROPERTY_TYPE_UNSUPPORTED:'Loại BĐS chưa có quy tắc Gate A.',RENT_PERIOD_NOT_SUPPORTED_BY_PROPERTY_CORE:'Property Core hiện chỉ lưu được giá thuê theo tháng; kỳ hạn này chưa thể duyệt.',SALE_PRICE_PERIOD_INVALID:'Giá bán không nhận chu kỳ thuê.'};$('#review-msg').textContent=r.ok?'Đã cập nhật: '+(d.state||'OK'):(gateErrors[d.error]||d.error||'Lỗi');loadReviews();if(r.ok)loadReview(id)}
-async function load(){const r=await fetch('/api/intakes',{credentials:'same-origin',cache:'no-store'});const rows=await r.json();if(!r.ok){$('#queue').textContent=rows.error||'Không tải được Intake';return}window.intakeRecords=rows;const host=$('#queue');host.replaceChildren();const isTestOnly=x=>x.source==='TEST_ONLY'||[x.sourceGroup,x.note,x.clientBatchId].some(v=>String(v||'').includes('TEST_ONLY'));const hidden=rows.filter(isTestOnly).length;const visible=rows.filter(x=>!isTestOnly(x));if(hidden){const note=document.createElement('p');note.className='muted';note.textContent=hidden+' intake TEST_ONLY được ẩn khỏi hàng đợi vận hành; dữ liệu chưa bị xóa.';host.append(note)}if(!visible.length){const empty=document.createElement('p');empty.textContent='Chưa có intake cần xử lý.';host.append(empty);return}for(const x of visible){const row=document.createElement('article');row.className='item';row.dataset.intakeId=x.id;const title=document.createElement('b');title.textContent=x.id;const state=document.createElement('span');state.className='status';state.textContent=x.status||'RECEIVED';const detail=document.createElement('div');detail.textContent=(x.source||'')+' · '+(x.createdAt||'');const note=document.createElement('div');note.className='muted';note.textContent=(x.media||[]).length+' media · '+(x.note||'Không có ghi chú');row.append(title,document.createTextNode(' '),state,detail,note);if(['RECEIVED','DRAFT_NEEDS_REVIEW'].includes(x.status||'RECEIVED')){const action=document.createElement('button');action.type='button';action.textContent='TIẾP TỤC XỬ LÝ';action.onclick=()=>createContent(x.id,action);row.append(action)}else if(x.status==='CONTENT_CREATED'&&x.contentReviewId){const action=document.createElement('button');action.type='button';action.textContent='XEM 5 CONTENT';action.onclick=async()=>{window.navigateAdminScreen?.('content',{intakeId:x.id,reviewId:x.contentReviewId});await loadReviews();await window.loadReview(x.contentReviewId)};row.append(action)}const msg=document.createElement('p');msg.setAttribute('data-intake-action-status','');msg.setAttribute('role','status');row.append(msg);host.append(row)}}
-const intakeForm=$('#intake'),mediaInput=$('#intake-media-input'),addMedia=$('#intake-add-media'),mediaCount=$('#intake-media-count'),mediaList=$('#intake-media-list'),previewDialog=$('#intake-preview'),previewImage=$('#intake-preview-image'),previewClose=$('#intake-preview-close'),saveIntake=$('#intake-save'),newIntake=$('#intake-new');let intakeFiles=[],intakeBusy=false,intakeScanGeneration=0;let pendingSavedIntakeId=null;newIntake.onclick=()=>{if(!pendingSavedIntakeId)return;intakeForm.reset();pendingSavedIntakeId=null;newIntake.hidden=true;intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)});intakeFiles=[];renderIntakeFiles();$('#intake-msg').textContent='Nguồn Intake trước đã lưu trong Queue.'};const contentRequestsInFlight=new Set();function contentRequestKey(keyName){let key;try{key=localStorage.getItem(keyName)||sessionStorage.getItem(keyName);if(!key)key=crypto.randomUUID().replace(/-/g,'');localStorage.setItem(keyName,key);sessionStorage.setItem(keyName,key);if(localStorage.getItem(keyName)!==key)throw Error('storage verification failed');return key}catch(_){throw Error('CONTENT_IDEMPOTENCY_STORAGE_UNAVAILABLE')}}function clearContentRequestKey(keyName){try{localStorage.removeItem(keyName)}catch(_){}try{sessionStorage.removeItem(keyName)}catch(_){}}async function createContent(intakeId,button,externalConsent=false,sourceMediaRightsConfirmed=false){if(contentRequestsInFlight.has(intakeId))return false;contentRequestsInFlight.add(intakeId);if(button)button.disabled=true;const statusNode=button?.closest('article')?.querySelector('[data-intake-action-status]')||$('#intake-msg');statusNode.className='muted';statusNode.textContent='Đang kiểm tra Intake, dữ kiện và quyền nguồn…';const keyName='sala-content-idem:'+intakeId;let key,requestStarted=false,responseConfirmed=false,timeoutId;try{key=contentRequestKey(keyName);const controller=new AbortController();timeoutId=window.setTimeout(()=>controller.abort(),90000);statusNode.textContent='Đang gửi yêu cầu; chờ máy chủ xác minh điều kiện và trạng thái…';const request=fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/create-content',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({idempotency_key:key,external_text_processing_consent:externalConsent===true,source_media_rights_confirmed:sourceMediaRightsConfirmed===true}),signal:controller.signal});requestStarted=true;const r=await request;let d;try{d=await r.json()}catch(_){throw Error('Máy chủ trả phản hồi không hợp lệ; giữ khóa chống lặp để không gửi lại tự động.')}if(r.status!==201&&r.status!==200){if(r.status<500&&d.error!=='CONTENT_REQUEST_OUTCOME_UNKNOWN'&&d.provider_calls===0)clearContentRequestKey(keyName);if(['CONTENT_PREREQUISITES_REQUIRED','CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED','CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED'].includes(d.error)&&window.openMissingFields){await load();const record=(window.intakeRecords||[]).find(x=>x.id===intakeId);window.openMissingFields(intakeId,d,record)}else{statusNode.className='err';const uncertain=d.error==='CONTENT_REQUEST_OUTCOME_UNKNOWN'||d.previous_attempt_unverified;statusNode.textContent=(d.error||'CONTENT_CREATE_FAILED')+(uncertain?' · Lần trước chưa đối soát; không gửi lại.':d.provider_calls===0?' · Chưa gọi AI.':'')+' · Intake đã lưu: '+intakeId+'.';await load();if(d.review_id){await loadReviews();await window.loadReview(d.review_id)}}return false}responseConfirmed=true;clearContentRequestKey(keyName);statusNode.className='ok';statusNode.textContent='Đã tạo 5 bản nháp riêng tư. Chưa duyệt, chưa đăng.';await load();await loadReviews();await window.loadReview(d.review_id);window.onContentBatchCreated?.({review_id:d.review_id,intake_id:intakeId});return true}catch(e){statusNode.className='err';if(responseConfirmed){clearContentRequestKey(keyName);statusNode.textContent='Content đã lưu, nhưng màn hình chưa tải được. Mở lại Intake này để xem 5 bản nháp; không tạo lại.';try{await load()}catch(_){}}else if(!requestStarted){clearContentRequestKey(keyName);statusNode.textContent='Chưa gửi yêu cầu: không lưu được khóa chống lặp trên thiết bị. Hãy thử lại khi bộ nhớ trình duyệt hoạt động · Intake đã lưu: '+intakeId+'.'}else{const timedOut=e?.name==='AbortError';statusNode.textContent=(timedOut?'Quá 90 giây chưa có phản hồi.':'Mất kết nối trước khi xác nhận kết quả.')+' Kết quả chưa rõ; mã chống trùng được giữ. Không tạo Intake mới hoặc gửi yêu cầu khác; mở lại đúng Intake để đối soát · '+intakeId+'.';try{await load()}catch(_){}}return false}finally{if(timeoutId)window.clearTimeout(timeoutId);contentRequestsInFlight.delete(intakeId);if(button)button.disabled=false}}
+async function load(){const r=await fetch('/api/intakes',{credentials:'same-origin',cache:'no-store'});const rows=await r.json();if(!r.ok){$('#queue').textContent=rows.error||'Không tải được Intake';return}window.intakeRecords=rows;const host=$('#queue');host.replaceChildren();const isTestOnly=x=>x.source==='TEST_ONLY'||[x.sourceGroup,x.note,x.clientBatchId].some(v=>String(v||'').includes('TEST_ONLY'));const hidden=rows.filter(isTestOnly).length;const visible=rows.filter(x=>!isTestOnly(x));if(hidden){const note=document.createElement('p');note.className='muted';note.textContent=hidden+' intake TEST_ONLY được ẩn khỏi hàng đợi vận hành; dữ liệu chưa bị xóa.';host.append(note)}if(!visible.length){const empty=document.createElement('p');empty.textContent='Chưa có intake cần xử lý.';host.append(empty);return}for(const x of visible){const row=document.createElement('article');row.className='item';row.dataset.intakeId=x.id;const title=document.createElement('b');title.textContent=x.id;const state=document.createElement('span');state.className='status';state.textContent=x.status||'RECEIVED';const detail=document.createElement('div');detail.textContent=(x.source||'')+' · '+(x.createdAt||'');const note=document.createElement('div');note.className='muted';note.textContent=(x.media||[]).length+' media · '+(x.note||'Không có ghi chú');row.append(title,document.createTextNode(' '),state,detail,note);if(x.contentAttemptState==='OUTCOME_UNVERIFIED'||x.contentAttemptState==='SAFE_PREFLIGHT_FAILURE'){const action=document.createElement('button');action.type='button';action.textContent='ĐỐI SOÁT CONTENT';action.onclick=()=>reconcileIntakeContent(x.id,action);row.append(action)}else if(['RECEIVED','DRAFT_NEEDS_REVIEW'].includes(x.status||'RECEIVED')){const action=document.createElement('button');action.type='button';action.textContent='TIẾP TỤC XỬ LÝ';action.onclick=()=>createContent(x.id,action,x.contentConsent?.external_text_processing_consent===true,x.contentConsent?.source_media_rights_confirmed===true);row.append(action)}else if(x.status==='CONTENT_CREATED'&&x.contentReviewId){const action=document.createElement('button');action.type='button';action.textContent='XEM 5 CONTENT';action.onclick=async()=>{window.navigateAdminScreen?.('content',{intakeId:x.id,reviewId:x.contentReviewId});await loadReviews();await window.loadReview(x.contentReviewId)};row.append(action)}const msg=document.createElement('p');msg.setAttribute('data-intake-action-status','');msg.setAttribute('role','status');row.append(msg);host.append(row)}}
+const intakeForm=$('#intake'),mediaInput=$('#intake-media-input'),addMedia=$('#intake-add-media'),mediaCount=$('#intake-media-count'),mediaList=$('#intake-media-list'),previewDialog=$('#intake-preview'),previewImage=$('#intake-preview-image'),previewClose=$('#intake-preview-close'),saveIntake=$('#intake-save'),newIntake=$('#intake-new');let intakeFiles=[],intakeBusy=false,intakeScanGeneration=0;let pendingSavedIntakeId=null;newIntake.onclick=()=>{if(!pendingSavedIntakeId)return;intakeForm.reset();pendingSavedIntakeId=null;newIntake.hidden=true;intakeFiles.forEach(x=>{if(x.url)URL.revokeObjectURL(x.url)});intakeFiles=[];renderIntakeFiles();$('#intake-msg').textContent='Nguồn Intake trước đã lưu trong Queue.'};const contentRequestsInFlight=new Set();function contentRequestKey(keyName){let key;try{key=localStorage.getItem(keyName)||sessionStorage.getItem(keyName);if(!key)key=crypto.randomUUID().replace(/-/g,'');localStorage.setItem(keyName,key);sessionStorage.setItem(keyName,key);if(localStorage.getItem(keyName)!==key)throw Error('storage verification failed');return key}catch(_){throw Error('CONTENT_IDEMPOTENCY_STORAGE_UNAVAILABLE')}}function clearContentRequestKey(keyName){try{localStorage.removeItem(keyName)}catch(_){}try{sessionStorage.removeItem(keyName)}catch(_){}}async function createContent(intakeId,button,externalConsent=false,sourceMediaRightsConfirmed=false,retryPreflight=false){if(contentRequestsInFlight.has(intakeId))return false;contentRequestsInFlight.add(intakeId);if(button)button.disabled=true;const statusNode=button?.closest('article')?.querySelector('[data-intake-action-status]')||$('#intake-msg');statusNode.className='muted';statusNode.textContent='Đang kiểm tra Intake, dữ kiện và quyền nguồn…';const keyName='sala-content-idem:'+intakeId;let key,requestStarted=false,responseConfirmed=false,timeoutId;try{key=contentRequestKey(keyName);const controller=new AbortController();timeoutId=window.setTimeout(()=>controller.abort(),90000);statusNode.textContent='Đang gửi yêu cầu; chờ máy chủ xác minh điều kiện và trạng thái…';const request=fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/create-content',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({idempotency_key:key,external_text_processing_consent:externalConsent===true,source_media_rights_confirmed:sourceMediaRightsConfirmed===true,retry_preflight:retryPreflight===true}),signal:controller.signal});requestStarted=true;const r=await request;let d;try{d=await r.json()}catch(_){throw Error('Máy chủ trả phản hồi không hợp lệ; giữ khóa chống lặp để không gửi lại tự động.')}if(r.status!==201&&r.status!==200){if(r.status<500&&d.error!=='CONTENT_REQUEST_OUTCOME_UNKNOWN'&&d.provider_calls===0)clearContentRequestKey(keyName);if(['CONTENT_PREREQUISITES_REQUIRED','CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED','CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED'].includes(d.error)&&window.openMissingFields){await load();const record=(window.intakeRecords||[]).find(x=>x.id===intakeId);window.openMissingFields(intakeId,d,record)}else{statusNode.className='err';const uncertain=d.error==='CONTENT_REQUEST_OUTCOME_UNKNOWN'||d.previous_attempt_unverified;statusNode.textContent=(d.error||'CONTENT_CREATE_FAILED')+(uncertain?' · Lần trước chưa đối soát; không gửi lại.':d.provider_calls===0?' · Chưa gọi AI.':'')+' · Intake đã lưu: '+intakeId+'.';await load();if(d.review_id){await loadReviews();await window.loadReview(d.review_id)}}return false}responseConfirmed=true;clearContentRequestKey(keyName);statusNode.className='ok';statusNode.textContent='Đã tạo 5 bản nháp riêng tư. Chưa duyệt, chưa đăng.';await load();await loadReviews();await window.loadReview(d.review_id);window.onContentBatchCreated?.({review_id:d.review_id,intake_id:intakeId});return true}catch(e){statusNode.className='err';if(responseConfirmed){clearContentRequestKey(keyName);statusNode.textContent='Content đã lưu, nhưng màn hình chưa tải được. Mở lại Intake này để xem 5 bản nháp; không tạo lại.';try{await load()}catch(_){}}else if(!requestStarted){clearContentRequestKey(keyName);statusNode.textContent='Chưa gửi yêu cầu: không lưu được khóa chống lặp trên thiết bị. Hãy thử lại khi bộ nhớ trình duyệt hoạt động · Intake đã lưu: '+intakeId+'.'}else{const timedOut=e?.name==='AbortError';statusNode.textContent=(timedOut?'Quá 90 giây chưa có phản hồi.':'Mất kết nối trước khi xác nhận kết quả.')+' Kết quả chưa rõ; mã chống trùng được giữ. Không tạo Intake mới hoặc gửi yêu cầu khác; mở lại đúng Intake để đối soát · '+intakeId+'.';try{await load()}catch(_){}}return false}finally{if(timeoutId)window.clearTimeout(timeoutId);contentRequestsInFlight.delete(intakeId);if(button)button.disabled=false}}
+async function reconcileIntakeContent(intakeId,button){const row=button?.closest('article'),statusNode=row?.querySelector('[data-intake-action-status]');if(button)button.disabled=true;if(statusNode){statusNode.className='muted';statusNode.textContent='Đang đối soát trạng thái Content (chỉ đọc)…'}try{const r=await fetch('/api/intakes/'+encodeURIComponent(intakeId)+'/content-status',{credentials:'same-origin',cache:'no-store'}),d=await r.json();if(!r.ok)throw Error(d.error||'CONTENT_STATUS_UNAVAILABLE');const labels={NO_ATTEMPT:'Chưa có lần tạo Content.',SUCCEEDED:'Đã có Content; không gửi lại.',OUTCOME_UNVERIFIED:'Yêu cầu trước có thể đã gửi tới nhà cung cấp; không gửi lại.',SAFE_RETRY_AVAILABLE:'Lỗi giới hạn xảy ra trước khi gửi đi. Có thể thử lại đúng một lần.',RETRY_LIMIT_REACHED:'Đã hết lượt thử an toàn cho revision này.',BLOCKED:'Yêu cầu đang bị chặn; xem điều kiện còn thiếu.'};if(statusNode){statusNode.className=d.can_retry?'muted':(d.state==='OUTCOME_UNVERIFIED'?'err':'muted');statusNode.textContent=(labels[d.state]||d.state)+(d.error?' · '+d.error:'')+' · provider calls ghi nhận: '+d.provider_calls+'.'}if(d.can_retry&&row){const retry=document.createElement('button');retry.type='button';retry.textContent='TẠO CONTENT LẠI · 1 LẦN';retry.onclick=()=>createContent(intakeId,retry,d.consent?.external_text_processing_consent===true,d.consent?.source_media_rights_confirmed===true,true);statusNode?.after(retry)}}catch(e){if(statusNode){statusNode.className='err';statusNode.textContent='Không đọc được trạng thái; giữ nguyên khóa chống lặp và không gửi lại. '+e.message}}finally{if(button)button.disabled=false}}window.reconcileIntakeContent=reconcileIntakeContent;
 const isImageFile=file=>file.type.startsWith('image/')||/\\.(jpe?g|png|webp|heic)$/i.test(file.name);
 function renderIntakeFiles(){mediaCount.textContent=intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length===1?'1 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn';mediaList.replaceChildren();intakeFiles.forEach((item,index)=>{const card=document.createElement('div');card.className='intake-media-card';if(item.url){const open=document.createElement('button');open.type='button';open.className='intake-media-open';open.setAttribute('aria-label','Phóng to '+item.file.name);const img=document.createElement('img');img.className='intake-media-thumb';img.src=item.url;img.alt=item.file.name;open.append(img);open.onclick=()=>{previewImage.src=item.url;previewImage.alt=item.file.name;if(previewDialog.showModal)previewDialog.showModal();else window.open(item.url,'_blank','noopener')};card.append(open)}else{const icon=document.createElement('div');icon.className='intake-media-thumb';icon.textContent='TỆP';icon.setAttribute('aria-hidden','true');icon.style.display='grid';icon.style.placeItems='center';card.append(icon)}const name=document.createElement('span');name.className='intake-media-name';name.textContent=item.file.name+' · '+Math.ceil(item.file.size/1024)+' KB';card.append(name);if(item.duplicate){const badge=document.createElement('span');badge.className='intake-media-duplicate';badge.textContent='Ảnh trùng bytes · máy chủ sẽ giữ bản đầu';card.append(badge)}const remove=document.createElement('button');remove.type='button';remove.className='remove-media';remove.textContent='Bỏ ảnh/tệp';remove.disabled=intakeBusy;remove.onclick=()=>{if(item.url)URL.revokeObjectURL(item.url);intakeFiles.splice(index,1);scanIntakeDuplicates()};card.append(remove);mediaList.append(card)})}
 async function scanIntakeDuplicates(){const generation=++intakeScanGeneration;intakeBusy=true;mediaInput.disabled=true;addMedia.disabled=true;renderIntakeFiles();const seen=new Set();let unsupported=false;for(const item of intakeFiles){item.duplicate=false;if(!isImageFile(item.file))continue;if(!window.crypto||!window.crypto.subtle){unsupported=true;continue}try{const bytes=await item.file.arrayBuffer(),digest=Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');item.duplicate=seen.has(digest);seen.add(digest)}catch(_){unsupported=true}}if(generation!==intakeScanGeneration)return;intakeBusy=false;mediaInput.disabled=false;addMedia.disabled=false;renderIntakeFiles();const duplicates=intakeFiles.filter(x=>x.duplicate).length;mediaCount.textContent=(intakeFiles.length===0?'0 ảnh/tệp đã chọn':intakeFiles.length+' ảnh/tệp đã chọn')+(duplicates?' · phát hiện '+duplicates+' ảnh trùng, bản đầu được giữ':'')+(unsupported?' · máy chủ sẽ kiểm tra trùng bytes':'')}
@@ -2156,6 +2244,7 @@ class Handler(BaseHTTPRequestHandler):
         with PROPERTY_OPERATION_LOCK:
             existing_package = next((package for package in center.packages.values()
                 if str((package.get("candidate") or {}).get("intake_id") or "") == intake_id), None)
+            reusable_consent = reusable_content_consent(existing_package, record, _AI_PROVIDER.model)
             if existing_package is not None:
                 evidence_revisions = existing_package.get("evidence_revisions")
                 saved_evidence = (evidence_revisions[-1].get("evidence")
@@ -2194,12 +2283,46 @@ class Handler(BaseHTTPRequestHandler):
                         previous_provider_calls = int(previous_response.get("provider_calls") or 0)
                     except (TypeError, ValueError):
                         previous_provider_calls = 0
-                    if prior_attempt.get("status") == "IN_PROGRESS" or previous_provider_calls > 0:
+                    if (prior_attempt.get("status") == "IN_PROGRESS" or previous_provider_calls > 0
+                            or previous_response.get("dispatch_started") is not False):
                         self.send_json({"error": "CONTENT_REQUEST_OUTCOME_UNKNOWN",
                             "intake_id": intake_id, "review_id": existing_package.get("review_id"),
                             "provider_calls": 0, "previous_attempt_unverified": True,
                             "published": False}, 409)
                         return
+                    prior_error = previous_response.get("error")
+                    try:
+                        same_revision = int(prior_attempt.get("input_revision", -1)) == int(record.get("inputRevision", 1))
+                    except (TypeError, ValueError):
+                        same_revision = False
+                    if previous_response.get("dispatch_started") is False and same_revision:
+                        if prior_error not in CONTENT_SAFE_PREFLIGHT_ERRORS:
+                            self.send_json({"error": "CONTENT_PREVIOUS_ATTEMPT_BLOCKED", "reason": prior_error,
+                                "intake_id": intake_id, "review_id": existing_package.get("review_id"),
+                                "provider_calls": 0, "dispatch_started": False, "can_retry": False,
+                                "published": False}, 409)
+                            return
+                        safe_failures = []
+                        for entry in existing_package.get("content_generation_requests", []):
+                            if not isinstance(entry, dict) or not isinstance(entry.get("response"), dict):
+                                continue
+                            try:
+                                entry_same_revision = int(entry.get("input_revision", -1)) == int(record.get("inputRevision", 1))
+                            except (TypeError, ValueError):
+                                entry_same_revision = False
+                            if (entry_same_revision and entry["response"].get("dispatch_started") is False
+                                    and entry["response"].get("error") in CONTENT_SAFE_PREFLIGHT_ERRORS):
+                                safe_failures.append(entry)
+                        if len(safe_failures) >= 2:
+                            self.send_json({"error": "CONTENT_SAFE_RETRY_LIMIT_REACHED", "intake_id": intake_id,
+                                "review_id": existing_package.get("review_id"), "provider_calls": 0,
+                                "dispatch_started": False, "can_retry": False, "published": False}, 409)
+                            return
+                        if payload.get("retry_preflight") is not True:
+                            self.send_json({"error": "CONTENT_SAFE_RETRY_CONFIRMATION_REQUIRED", "intake_id": intake_id,
+                                "review_id": existing_package.get("review_id"), "provider_calls": 0,
+                                "dispatch_started": False, "can_retry": True, "published": False}, 409)
+                            return
         missing_fields, missing_evidence = intake_content_readiness(record)
         candidate_preview = to_candidate(record)
         stored_evidence = record.get("ownerEvidence") if isinstance(record.get("ownerEvidence"), dict) else None
@@ -2225,12 +2348,16 @@ class Handler(BaseHTTPRequestHandler):
                             "input_revision": int(record.get("inputRevision", 1)),
                             "provider_calls": 0, "published": False}, 409)
             return
-        if payload.get("source_media_rights_confirmed") is not True:
+        source_rights_confirmed = (payload.get("source_media_rights_confirmed") is True
+                                   or reusable_consent.get("source_media_rights_confirmed") is True)
+        external_consent_confirmed = (payload.get("external_text_processing_consent") is True
+                                      or reusable_consent.get("external_text_processing_consent") is True)
+        if not source_rights_confirmed:
             self.send_json({"error": "CONTENT_SOURCE_MEDIA_RIGHTS_CONFIRMATION_REQUIRED", "intake_id": intake_id,
                             "input_revision": int(record.get("inputRevision", 1)),
                             "provider_calls": 0, "published": False}, 409)
             return
-        if payload.get("external_text_processing_consent") is not True:
+        if not external_consent_confirmed:
             self.send_json({"error": "CONTENT_EXTERNAL_PROCESSING_CONSENT_REQUIRED", "intake_id": intake_id,
                             "input_revision": int(record.get("inputRevision", 1)),
                             "provider_calls": 0, "published": False}, 409)
@@ -2281,10 +2408,17 @@ class Handler(BaseHTTPRequestHandler):
                                  operation_id=f"op-{evidence_revision_id}", idempotency_key=evidence_revision_id)
                 generation_id = "generation-" + hashlib.sha256((intake_id + ":" + request_key).encode()).hexdigest()[:24]
                 consented_at = now_iso()
+                consent_scope = content_consent_scope(record, _AI_PROVIDER.model)
                 request_entry = {"idempotency_key": request_key, "generation_id": generation_id,
                                  "status": "IN_PROGRESS", "started_at": consented_at,
-                                 "source_media_rights_confirmed": True,
-                                 "external_text_processing_consent": True, "consented_at": consented_at}
+                                 "input_revision": int(record.get("inputRevision", 1)),
+                                 "consent_scope": consent_scope,
+                                 "consent_input_revision": int(record.get("inputRevision", 1)),
+                                 "consent_destination": CONTENT_CONSENT_DESTINATION,
+                                 "consent_model": _AI_PROVIDER.model,
+                                 "source_media_rights_confirmed": source_rights_confirmed,
+                                 "external_text_processing_consent": external_consent_confirmed,
+                                 "consented_at": consented_at}
                 live.setdefault("content_generation_requests", []).append(request_entry)
                 live["updated_at"] = request_entry["started_at"]
                 center._persist(live)
@@ -2323,9 +2457,15 @@ class Handler(BaseHTTPRequestHandler):
             provider=_AI_PROVIDER, model=_AI_PROVIDER.model, usage_sink=_USAGE_LEDGER,
             review_id=live["review_id"], source_text=source_text)
         if result.get("status") != "PASS" or len(result.get("variants", [])) != 5:
-            response = {"error": "CONTENT_GENERATION_BLOCKED", "reason_codes": result.get("reason_codes", [result.get("status", "BLOCKED")]),
+            reason_codes = result.get("reason_codes", [result.get("status", "BLOCKED")])
+            safe_error = reason_codes[0] if reason_codes and reason_codes[0] in CONTENT_SAFE_PREFLIGHT_ERRORS else "CONTENT_GENERATION_BLOCKED"
+            dispatch_started = result.get("dispatch_started")
+            provider_calls = result.get("provider_calls", 1 if dispatch_started is not False else 0)
+            response = {"error": safe_error, "reason_codes": reason_codes,
                         "intake_id": intake_id, "review_id": live["review_id"], "published": False,
-                        "provider_calls": 1, "receipt": result.get("receipt"),
+                        "provider_calls": provider_calls, "dispatch_started": dispatch_started,
+                        "can_retry": dispatch_started is False and safe_error in CONTENT_SAFE_PREFLIGHT_ERRORS,
+                        "receipt": result.get("receipt"),
                         "validation_diagnostic": result.get("validation_diagnostic")}
             request_entry.update({"status": "BLOCKED", "response": response, "finished_at": now_iso()})
             center._persist(live)
@@ -2952,6 +3092,25 @@ class Handler(BaseHTTPRequestHandler):
             self.analytics_report()
         elif path == "/api/intakes":
             self.send_json([project_intake_admin_list_item(item, REVIEW_CENTER) for item in load_index()])
+        elif (content_status_match := re.fullmatch(r"/api/intakes/([^/]+)/content-status", path)):
+            owner_id = self.owner_id()
+            configured_owner = os.environ.get("BMT_ADMIN_OWNER_ID", "owner").strip() or "owner"
+            if not owner_id or owner_id != configured_owner:
+                self.send_json({"error": "OWNER_CONTENT_STATUS_REQUIRED"}, 403)
+                return
+            intake_id = content_status_match.group(1)
+            record = next((item for item in load_index() if item.get("id") == intake_id), None)
+            if record is None:
+                self.send_json({"error": "INTAKE_NOT_FOUND"}, 404)
+                return
+            center = self.review_center_or_error()
+            if center is None:
+                return
+            try:
+                center._load_packages()
+                self.send_json(content_attempt_status(intake_id, record, center))
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                self.send_json({"error": "CONTENT_STATUS_UNAVAILABLE"}, 503)
         elif (intake_media_match := re.fullmatch(r"/api/intakes/([^/]+)/media/(media-[a-f0-9]{24})", path)):
             intake_id, media_id = intake_media_match.groups()
             record = next((item for item in load_index() if item.get("id") == intake_id), None)
