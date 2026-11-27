@@ -17,6 +17,8 @@ assert.match(source, /closest\('#missing-fields-dialog'\)\?\.querySelector\('#mi
   "pre-dispatch failures must be visible inside the dialog");
 assert.match(source, /window\.openMissingFields\?\.\(pendingSavedIntakeId/,
   "new Intake opens rights/consent UI before any generation request");
+assert.match(source, /contentAttemptState==='SAFE_PREFLIGHT_FAILURE'.+TIẾP TỤC CÙNG INTAKE/,
+  "confirmed pre-dispatch failures can continue on the same saved Intake after a new explicit revision");
 assert.doesNotMatch(source, /createContent\(pendingSavedIntakeId,saveIntake\)/,
   "Intake save is not an implicit Content generation request");
 assert.match(consentUiSource, /Quyền nguồn &amp; tạo Content/);
@@ -24,6 +26,7 @@ assert.match(consentUiSource, /TẠO 5 CONTENT/);
 assert.match(consentUiSource, /Quay lại/);
 assert.match(consentUiSource, /record\?\.contentConsent\?\.external_text_processing_consent===true/,
   "only server-projected, revision-scoped consent is reused");
+assert.match(consentUiSource, /Lần trước dừng trước khi gọi AI/);
 assert.match(consentUiSource, /AI-proposed facts are reviewed on Screen A/);
 assert.doesNotMatch(consentUiSource, /BỔ SUNG & TIẾP TỤC TẠO CONTENT/);
 const start = source.indexOf("const contentRequestsInFlight=new Set();function contentRequestKey");

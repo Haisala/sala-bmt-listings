@@ -106,7 +106,7 @@ def main() -> None:
         assert is_placeholder_location(placeholder)
     assert not is_placeholder_location("Mặt tiền Tôn Đức Thắng, EcoCity")
     saved_placeholder = {
-        "id": "TEST_ONLY-placeholder-address", "inputRevision": 3,
+        "id": "TEST_ONLY-placeholder-address", "inputRevision": 3, "sourcePrefillVersion": 2,
         "note": "Cho thuê căn hộ EcoCity, giá 6 triệu/tháng",
         "preliminaryFacts": {"address": "ngay"}, "media": [],
     }
@@ -117,6 +117,22 @@ def main() -> None:
     assert placeholder_projection["invalidPrefillFields"] == ["address"]
     assert "address" in missing_location
     assert saved_placeholder == placeholder_before
+
+    stale_parser_record = {
+        "id": "TEST_ONLY-stale-prefill-v1", "sourcePrefillVersion": 1, "inputRevision": 3,
+        "note": "Tên BĐS: Căn hộ TEST_ONLY Riverside. Căn hộ cho thuê, giá thuê 6 triệu/tháng; "
+                "mặt tiền Đỗ Quyên; công viên 5.000m²; kích thước 10x25m.",
+        "preliminaryFacts": {"address": "cực kỳ thoáng đãng", "area": "5 m²", "width": 10, "length": 25},
+        "media": [],
+    }
+    stale_before = deepcopy(stale_parser_record)
+    corrected_projection = admin.project_intake_prefill(stale_parser_record)
+    assert corrected_projection["preliminaryFacts"].get("address") == "Đỗ Quyên"
+    assert "area" not in corrected_projection["preliminaryFacts"]
+    assert corrected_projection["preliminaryFacts"]["width"] == 10
+    assert corrected_projection["preliminaryFacts"]["length"] == 25
+    assert corrected_projection["conflicts"] == []
+    assert stale_parser_record == stale_before
 
     explicit_sale = extract_source_facts(
         "Cần bán căn hộ EcoCity; giá bán 2 tỷ",

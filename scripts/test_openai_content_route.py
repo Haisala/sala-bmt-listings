@@ -59,7 +59,7 @@ def main():
       assert is_replay and replayed["id"]==saved["id"] and replayed["ownerEvidence"]==saved["ownerEvidence"]
     store=PropertyStore(private/"store.sqlite3"); noop=Noop()
     center=ReviewCenter(store,reliability=ReliabilityBoundary(noop.audit,noop.enqueue))
-    intake={"id":"TEST_ONLY-intake-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-fixture",
+    intake={"id":"TEST_ONLY-intake-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-fixture","sourcePrefillVersion":2,
       "note":"TEST_ONLY synthetic 72 square meter home in TEST_ONLY district",
       "preliminaryFacts":{"title":"TEST_ONLY-home","property_type":"HOUSE","transaction_type":"SALE","price_vnd":1000000000,"address":"TEST_ONLY address","area":"72 m²","house_type":"TEST_ONLY house","bedrooms":2,"bathrooms":1},
       "factProvenance":{"title":{"evidence_excerpt":"synthetic 72 square meter"},
@@ -72,7 +72,7 @@ def main():
     pkg=center.packages[pkg["review_id"]]
     pkg["evidence_revisions"]=[{"evidence_revision_id":"TEST_ONLY-evidence-r1","evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"}]}}]
     center._persist(pkg)
-    missing={"id":"TEST_ONLY-intake-no-rights","source":"TEST_ONLY","note":"TEST_ONLY synthetic source with title: TEST_ONLY rental home","preliminaryFacts":{"title":"TEST_ONLY rental home","property_type":"APARTMENT","transaction_type":"RENT","price_vnd_per_month":6000000,"price_cycle":"MONTH","address":"TEST_ONLY address","area":"72 m²"},"media":[]}
+    missing={"id":"TEST_ONLY-intake-no-rights","source":"TEST_ONLY","sourcePrefillVersion":2,"note":"TEST_ONLY synthetic source with title: TEST_ONLY rental home","preliminaryFacts":{"title":"TEST_ONLY rental home","property_type":"APARTMENT","transaction_type":"RENT","price_vnd_per_month":6000000,"price_cycle":"MONTH","address":"TEST_ONLY address","area":"72 m²"},"media":[]}
     provider=Provider();usage=Usage()
     handler=SimpleNamespace(owner_id=lambda:"owner",review_center_or_error=lambda:center)
     records=[intake,missing]
@@ -99,8 +99,7 @@ def main():
       assert body["media_analysis"]=="NOT_SENT" and provider.calls==1 and len(usage.rows)==1
       assert len(center.packages[body["review_id"]]["candidate"]["media"])==10
       assert provider.last_payload["media"]==[]
-      assert "synthetic 72 square meter" in provider.last_payload.get("source_text","")
-      assert provider.last_payload.get("source_text","") != intake["note"]
+      assert len(provider.last_payload.get("source_text","").encode("utf-8")) <= 360
       assert body["generation"]["content_variant_ids"]==[v["content_variant_id"] for v in body["variants"]]
       assert all(v["intake_id"]==intake["id"] and v["review_id"]==body["review_id"]
                  and v["review_revision"]==body["review_revision"]
@@ -135,7 +134,7 @@ def main():
       assert len(persisted["content_batches"])==1 and len(persisted["content_batches"][0]["variants"])==5
       assert persisted["content_batches"][0]["status"]=="PRIVATE_DRAFT"
       assert store.list_properties()==[]
-      uncertain_intake={"id":"TEST_ONLY-intake-unknown","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-unknown",
+      uncertain_intake={"id":"TEST_ONLY-intake-unknown","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-unknown","sourcePrefillVersion":2,
         "note":"TEST_ONLY synthetic source","preliminaryFacts":dict(intake["preliminaryFacts"]),
         "ownerEvidence":dict(intake["ownerEvidence"]),"media":[]}
       records.append(uncertain_intake)
@@ -153,7 +152,10 @@ def main():
       assert attempted_unknown_retry["status"]==409
       assert attempted_unknown_retry["value"]["error"]=="CONTENT_REQUEST_OUTCOME_UNKNOWN"
       assert provider.calls==1 and len(usage.rows)==1
-      safe_intake={"id":"TEST_ONLY-intake-preflight","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-preflight",
+      _,bounded_fallback=admin._provider_content_inputs({"facts":{},"fact_provenance":{},
+        "raw":{"note":"TEST_ONLY"+"x"*500}})
+      assert len(bounded_fallback.encode("utf-8"))==360
+      safe_intake={"id":"TEST_ONLY-intake-preflight","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-preflight","sourcePrefillVersion":2,
         "note":"TEST_ONLY synthetic source","preliminaryFacts":dict(intake["preliminaryFacts"]),
         "ownerEvidence":dict(intake["ownerEvidence"]),"media":[]}
       records.append(safe_intake)
@@ -179,6 +181,38 @@ def main():
       assert retried["status"]==201 and len(retried["value"]["variants"])==5
       assert retry_provider.calls==1 and len(retry_usage.rows)==1 and store.list_properties()==[]
       assert len(safe_package["content_generation_requests"])==2
+      upgraded_intake={"id":"TEST_ONLY-intake-prefill-upgrade","source":"TEST_ONLY",
+        "sourceGroup":"TEST_ONLY-prefill-upgrade",
+        "note":"Tên BĐS: Căn hộ TEST_ONLY Riverside. Căn hộ cho thuê, giá thuê 6 triệu/tháng; "
+          "mặt tiền Đỗ Quyên; công viên 5.000m²; kích thước 10x25m.",
+        "sourcePrefillVersion":1,"inputRevision":3,
+        "preliminaryFacts":{"address":"cực kỳ thoáng đãng","area":"5 m²","width":10,"length":25},
+        "ownerEvidence":{"source_id":"TEST_ONLY-upgrade-source","claim":"TEST_ONLY upgrade source","rights_status":"PERSONAL"},"media":[]}
+      records.append(upgraded_intake)
+      for n in (1,2):
+        with patch.object(admin,"_AI_PROVIDER",PreflightProvider()),patch.object(admin,"_USAGE_LEDGER",Usage()):
+          failed=call(handler,upgraded_intake["id"],f"TEST_ONLY-upgrade-prefill-{n:02d}",
+            {"retry_preflight":n==2})
+        assert failed["status"]==422 and failed["value"]["error"]=="CONTENT_INPUT_LIMIT_EXCEEDED"
+        assert failed["value"]["provider_calls"]==0
+      upgraded_package=next(p for p in center.packages.values()
+        if p["candidate"]["intake_id"]==upgraded_intake["id"])
+      old_review_revision=upgraded_package["review_revision"]
+      assert admin.content_attempt_status(upgraded_intake["id"],upgraded_intake,center)["state"]=="RETRY_LIMIT_REACHED"
+      # An explicit Owner save creates a new Intake revision; the original
+      # media and source stay attached while the current parser rebuilds facts.
+      upgraded_intake["inputRevision"]=4
+      retry_provider=Provider();retry_usage=Usage()
+      with patch.object(admin,"_AI_PROVIDER",retry_provider),patch.object(admin,"_USAGE_LEDGER",retry_usage):
+        upgraded=call(handler,upgraded_intake["id"],"TEST_ONLY-upgrade-explicit-new-revision-03")
+      assert upgraded["status"]==201 and len(upgraded["value"]["variants"])==5
+      refreshed=center.packages[upgraded["value"]["review_id"]]
+      assert refreshed["review_revision"]==old_review_revision+1
+      assert refreshed["candidate"]["facts"]["address"]=="Đỗ Quyên"
+      assert refreshed["candidate"]["facts"].get("area") in (None, "")
+      assert refreshed["candidate"]["facts"]["width"]==10 and refreshed["candidate"]["facts"]["length"]==25
+      assert len(refreshed["candidate"]["media"])==0
+      assert retry_provider.calls==1 and len(retry_usage.rows)==1 and store.list_properties()==[]
       denied=SimpleNamespace(owner_id=lambda:None,review_center_or_error=lambda:center,send_json=lambda v,status=200:None)
       denied_out=call(denied,intake["id"],"TEST_ONLY-anonymous-key-001")
       assert denied_out["status"]==403 and provider.calls==1
@@ -190,11 +224,11 @@ def main():
       assert generated_review["evidence_revisions"][0]["origin"]=="OWNER_CONFIRMED"
       conflict=call(handler,missing["id"],"TEST_ONLY-evidence-conflict-001",{"evidence":{"rights_status":"COMPANY","citations":[{"source_id":"TEST_ONLY-other","claim":"TEST_ONLY different source","rights_status":"COMPANY"}]}})
       assert conflict["status"]==409 and conflict["value"]["error"]=="EVIDENCE_INTAKE_MISMATCH" and provider.calls==2
-      intake_b={"id":"TEST_ONLY-intake-b","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-fixture-b","note":"TEST_ONLY separate source","preliminaryFacts":dict(intake["preliminaryFacts"]),"ownerEvidence":{"source_id":"TEST_ONLY-source-b","claim":"TEST_ONLY evidence for B","rights_status":"COMPANY"},"media":[]}
+      intake_b={"id":"TEST_ONLY-intake-b","source":"TEST_ONLY","sourcePrefillVersion":2,"sourceGroup":"TEST_ONLY-fixture-b","note":"TEST_ONLY separate source","preliminaryFacts":dict(intake["preliminaryFacts"]),"ownerEvidence":{"source_id":"TEST_ONLY-source-b","claim":"TEST_ONLY evidence for B","rights_status":"COMPANY"},"media":[]}
       records.append(intake_b)
       wrong_evidence=call(handler,intake_b["id"],"TEST_ONLY-cross-intake-001",{"evidence":{"rights_status":"PERSONAL","citations":[{"source_id":"TEST_ONLY-source","claim":"TEST_ONLY synthetic fixture","rights_status":"PERSONAL"}]}})
       assert wrong_evidence["status"]==409 and wrong_evidence["value"]["error"]=="EVIDENCE_INTAKE_MISMATCH" and wrong_evidence["value"]["intake_id"]==intake_b["id"]
-      failed_intake={"id":"TEST_ONLY-intake-bad-facts-used","source":"TEST_ONLY","sourceGroup":"SYNTHETIC",
+      failed_intake={"id":"TEST_ONLY-intake-bad-facts-used","source":"TEST_ONLY","sourcePrefillVersion":2,"sourceGroup":"SYNTHETIC",
         "note":"TEST_ONLY source text","preliminaryFacts":{"title":"TEST_ONLY","property_type":"APARTMENT",
         "transaction_type":"SALE","price_vnd":1000000,"address":"TEST_ONLY Lane","area":"50 m2"},
         "ownerEvidence":{"source_id":"TEST_ONLY-source-c","claim":"TEST_ONLY only","rights_status":"COMPANY"},"media":[]}
@@ -218,7 +252,7 @@ def main():
     http_private=http_root/"private"; http_private.mkdir(mode=0o700)
     http_store=PropertyStore(http_private/"store.sqlite3")
     http_center=ReviewCenter(http_store,reliability=ReliabilityBoundary(noop.audit,noop.enqueue))
-    http_intake={"id":"TEST_ONLY-intake-http-001","source":"TEST_ONLY","sourceGroup":"TEST_ONLY-http-fixture",
+    http_intake={"id":"TEST_ONLY-intake-http-001","source":"TEST_ONLY","sourcePrefillVersion":2,"sourceGroup":"TEST_ONLY-http-fixture",
       "note":"TEST_ONLY Apartment available for rent; address EcoCity.","preliminaryFacts":{"transaction_type":"RENT"},
       "factProvenance":{"title":{"evidence_excerpt":"TEST_ONLY Apartment"}},
       "ownerEvidence":{"source_id":"TEST_ONLY-http-source","claim":"TEST_ONLY source","rights_status":"PERSONAL"},"inputRevision":1,"media":[]}
