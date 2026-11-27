@@ -68,6 +68,71 @@ class CustomerWebTests(unittest.TestCase):
             headers["Cookie"] = f"sala_owner_session={cookie}"
         return self.app.handle("POST", "/api/intakes", headers, body)
 
+    def test_public_build_has_no_customer_owner_or_property_store(self):
+        path = Path(self.temp.name) / "public-only" / "must-not-exist.sqlite3"
+        app = Application(path, allowed_origins={ORIGIN}, legacy_owner_enabled=False)
+        self.assertIsNone(app.store)
+        self.assertFalse(path.exists())
+        self.assertEqual(json.loads(app.handle("GET", "/health").body)["storage"], "admin_projection")
+        self.assertEqual(app.handle("POST", "/api/login", {"Origin": ORIGIN}, b"{}" ).status, 404)
+        self.assertEqual(app.handle("GET", "/api/admin/listings").status, 404)
+        self.assertEqual(app.handle("POST", "/api/intakes", {"Origin": ORIGIN}, b"" ).status, 404)
+        self.assertFalse(path.exists())
+        with self.assertRaisesRegex(AuthError, "cannot configure a legacy Owner credential"):
+            Application(path, PASSWORD, {ORIGIN}, legacy_owner_enabled=False)
+
+    def test_isolated_https_test_namespace_is_authenticated_and_separate(self):
+        root = Path(self.temp.name) / "test-namespace"
+        projection = root / "projection" / "listings.json"
+        assets = root / "assets"
+        image_ref = "assets/images/test-only-home/front.png"
+        asset = assets / "images" / "test-only-home" / "front.png"
+        asset.parent.mkdir(mode=0o700, parents=True)
+        asset.write_bytes(PNG)
+        asset.chmod(0o600)
+        projection.parent.mkdir(mode=0o700, parents=True)
+        row = {
+            "id": "listing-test-only", "slug": "test-only-home", "title": "TEST_ONLY sample home",
+            "status": "Đang bán", "price": 1250000000, "features": [], "images": [image_ref],
+            "updatedAt": "2026-11-23T00:00:00Z", "propertyType": "HOUSE", "addressText": "TEST_ONLY area",
+            "area": 72, "transactionType": "SALE", "description": "Synthetic public description",
+            "propertyId": "property-test-only", "propertyRevision": 1,
+            "projectionId": "projection-test-only", "publicationId": "publication-0123456789abcdef0123456789abcdef",
+            "projectionGeneratedAt": "2026-11-23T00:00:00Z", "sourceSystem": "SALA_PROPERTY_CORE",
+            "publicationStatus": "APPROVED", "publicationRevision": 1,
+            "publicationApprovedAt": "2026-11-23T00:00:00Z", "mediaRights": {image_ref: "APPROVED_PUBLIC"},
+        }
+        projection.write_text(json.dumps([row], ensure_ascii=False), encoding="utf-8")
+        token = "test-only-bearer-token-value-0123456789abcdef"
+        app = Application(
+            Path(self.temp.name) / "must-not-exist.sqlite3", allowed_origins={ORIGIN},
+            public_projection_path=Path(self.temp.name) / "shared-projection-missing.json",
+            public_assets_root=Path(self.temp.name) / "shared-assets-missing", legacy_owner_enabled=False,
+            test_namespace_projection_path=projection, test_namespace_assets_root=root,
+            test_namespace_token=token,
+        )
+        prefix = "/__issue39_test__"
+        self.assertEqual(app.handle("GET", prefix + "/api/listings").status, 401)
+        self.assertEqual(app.handle("GET", prefix + "/api/listings", {"Authorization": "Bearer invalid-token"}).status, 401)
+        headers = {"Authorization": f"Bearer {token}"}
+        feed = app.handle("GET", prefix + "/api/listings?q=TEST_ONLY", headers)
+        self.assertEqual(feed.status, 200)
+        listing = json.loads(feed.body)["items"][0]
+        self.assertEqual(listing["property_id"], "property-test-only")
+        self.assertNotIn("owner_contact", listing)
+        self.assertEqual(app.handle("GET", prefix + "/api/listings/listing-test-only", headers).status, 200)
+        media = app.handle("GET", prefix + "/media/" + listing["media"][0]["media_id"], headers)
+        self.assertEqual((media.status, media.body), (200, PNG))
+        self.assertEqual(app.handle("GET", "/api/listings").status, 503)
+        self.assertEqual(app.handle("POST", prefix + "/api/listings", headers, b"{}" ).status, 404)
+        self.assertFalse((Path(self.temp.name) / "must-not-exist.sqlite3").exists())
+        projection.write_text("[]", encoding="utf-8")
+        self.assertEqual(json.loads(app.handle("GET", prefix + "/api/listings", headers).body)["items"], [])
+        self.assertEqual(app.handle("GET", prefix + "/api/listings/listing-test-only", headers).status, 404)
+        self.assertEqual(app.handle("GET", prefix + "/media/" + listing["media"][0]["media_id"], headers).status, 404)
+        disabled = Application(Path(self.temp.name) / "disabled.sqlite3", allowed_origins={ORIGIN}, legacy_owner_enabled=False)
+        self.assertEqual(disabled.handle("GET", prefix + "/api/listings", headers).status, 404)
+
     def test_boot_health_assets_and_secure_headers(self):
         health = self.app.handle("GET", "/health")
         self.assertEqual(health.status, 200)
@@ -139,7 +204,7 @@ class CustomerWebTests(unittest.TestCase):
             self.assertEqual(self.post("/api/login", {"password":"wrong password long"}).status, 401)
         self.assertEqual(self.post("/api/login", {"password":"wrong password long"}).status, 429)
 
-    def test_input_review_public_search_detail_and_media_flow(self):
+    def test_legacy_input_review_stays_private_without_admin_projection(self):
         cookie = self.login()
         file = [("media", "room.png", "image/png", PNG)]
         created = self.intake(files=file, cookie=cookie)
@@ -147,29 +212,23 @@ class CustomerWebTests(unittest.TestCase):
         receipt = json.loads(created.body)
         self.assertEqual(receipt["state"], "PENDING_REVIEW")
         self.assertEqual(receipt["file_count"], 1)
-        self.assertEqual(self.app.handle("GET", "/api/listings").body, b'{"items":[]}')
+        self.assertEqual(self.app.handle("GET", "/api/listings").status, 503)
         pending = json.loads(self.app.handle("GET", "/api/admin/pending", {"Cookie": f"sala_owner_session={cookie}"}).body)["items"]
         self.assertEqual(len(pending), 1)
         media_id = pending[0]["media"][0]["media_id"]
-        self.assertEqual(self.app.handle("GET", f"/media/{media_id}").status, 404)
+        self.assertEqual(self.app.handle("GET", f"/media/{media_id}").status, 503)
         reviewed = self.post(f"/api/listings/{receipt['listing_id']}/review", {"action": "approve"}, cookie)
         self.assertEqual(json.loads(reviewed.body)["state"], "APPROVED")
-        public = json.loads(self.app.handle("GET", "/api/listings?q=TEST_ONLY").body)["items"]
-        self.assertEqual(len(public), 1)
-        item = json.loads(self.app.handle("GET", f"/api/listings/{receipt['listing_id']}").body)
-        self.assertEqual((item["listing_id"], item["area_m2"]), (receipt["listing_id"], 72.5))
-        self.assertNotIn("source", item); self.assertNotIn("property_id", item); self.assertNotIn("revision_id", item)
-        self.assertEqual(len(item["media"]), 1)
-        img = self.app.handle("GET", f"/media/{item['media'][0]['media_id']}")
-        self.assertEqual(img.status, 200); self.assertEqual(img.body, PNG)
-        self.assertEqual(len(json.loads(self.app.handle("GET", "/api/listings?transaction_type=RENT").body)["items"]), 0)
+        self.assertEqual(self.app.handle("GET", "/api/listings?q=TEST_ONLY").status, 503)
+        self.assertEqual(self.app.handle("GET", f"/api/listings/{receipt['listing_id']}").status, 503)
+        self.assertEqual(self.app.handle("GET", f"/media/{media_id}").status, 503)
 
     def test_reject_duplicate_and_sale_rent_identity(self):
         cookie = self.login()
         created = json.loads(self.intake(cookie=cookie).body)
         rejected = self.post(f"/api/listings/{created['listing_id']}/review", {"action": "reject"}, cookie)
         self.assertEqual(json.loads(rejected.body)["state"], "REJECTED")
-        self.assertEqual(json.loads(self.app.handle("GET", "/api/listings").body)["items"], [])
+        self.assertEqual(self.app.handle("GET", "/api/listings").status, 503)
         # A resubmission of the same property and transaction cannot duplicate it.
         duplicate = self.intake(cookie=cookie)
         self.assertEqual(duplicate.status, 409)
@@ -200,12 +259,9 @@ class CustomerWebTests(unittest.TestCase):
         revision = json.loads(response.body)
         self.assertEqual(revision["revision_no"], 2)
         self.assertEqual(revision["state"], "PENDING_REVIEW")
-        self.assertEqual(self.app.handle("GET", f"/api/listings/{created['listing_id']}").status, 404)
+        self.assertEqual(self.app.handle("GET", f"/api/listings/{created['listing_id']}").status, 503)
         self.assertEqual(self.post(f"/api/listings/{created['listing_id']}/review", {"action":"approve"}, cookie).status, 200)
-        current = json.loads(self.app.handle("GET", f"/api/listings/{created['listing_id']}").body)
-        self.assertNotIn("status", current)
-        self.assertEqual(current["price_vnd"], 2750000000)
-        self.assertEqual(len(current["media"]), 1)
+        self.assertEqual(self.app.handle("GET", f"/api/listings/{created['listing_id']}").status, 503)
         admin_item = json.loads(self.app.handle("GET", "/api/admin/listings", {"Cookie":f"sala_owner_session={cookie}"}).body)["items"][0]
         self.assertEqual((admin_item["revision_no"], admin_item["status"]), (2, "APPROVED"))
 
@@ -217,7 +273,7 @@ class CustomerWebTests(unittest.TestCase):
         oversized_count = [("media", f"{i}.png", "image/png", PNG) for i in range(9)]
         self.assertEqual(self.intake(files=oversized_count, cookie=cookie).status, 400)
         self.assertEqual(self.app.handle("POST", "/api/intakes", {"Origin": ORIGIN, "Content-Type": "application/json"}, b"x" * (10*1024*1024+1)).status, 413)
-        self.assertEqual(len(json.loads(self.app.handle("GET", "/api/listings").body)["items"]), 0)
+        self.assertEqual(self.app.handle("GET", "/api/listings").status, 503)
         with self.assertRaises(ValueError):
             parse_multipart("multipart/form-data; boundary=x", b"invalid")
 
@@ -227,13 +283,15 @@ class CustomerWebTests(unittest.TestCase):
         self.assertNotIn("innerHTML", js)
         self.assertIn("textContent", js)
         self.assertNotIn("tel:", html + js)
-        self.assertIn("Chưa kết nối gửi liên hệ; không có dữ liệu nào được gửi.", js)
+        self.assertIn('cta.disabled=true', js)
+        self.assertIn("Chưa có số điện thoại, Zalo hoặc liên kết liên hệ công khai được Owner xác nhận.", js)
+        self.assertNotIn('track("contact_cta_click"', js)
         cookie = self.login()
         xss = self.intake(listing_fields(title="<script>alert(1)</script>"), cookie=cookie)
         item = json.loads(xss.body)
         self.post(f"/api/listings/{item['listing_id']}/review", {"action":"approve"}, cookie)
         public = self.app.handle("GET", f"/api/listings/{item['listing_id']}")
-        self.assertIn(b"<script>", public.body)  # JSON data is not executed; UI inserts it using textContent.
+        self.assertEqual(public.status, 503)  # legacy SQLite rows never become public without Admin's projection.
         self.assertEqual(self.app.handle("GET", "/../../etc/passwd").status, 404)
 
 
